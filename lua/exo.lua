@@ -7,9 +7,21 @@ local opencode_url = "http://localhost:4096"
 
 M.setup = function()
     NS = vim.api.nvim_create_namespace("exoskeleton")
-    vim.api.nvim_set_hl(0, "ExoReview", {
+    vim.api.nvim_set_hl(0, "ExoReviewGood", {
         fg = "#ffffff",
-        bg = "#000370",
+        bg = "#1fff0f",
+    })
+    vim.api.nvim_set_hl(0, "ExoReviewOkay", {
+        fg = "#ffffff",
+        bg = "#f6bb00",
+    })
+    vim.api.nvim_set_hl(0, "ExoReviewPoor", {
+        fg = "#ffffff",
+        bg = "#ff160c",
+    })
+    vim.api.nvim_set_hl(0, "ExoReviewInProgress", {
+        fg = "#ffffff",
+        bg = "#4052D6",
     })
     vim.keymap.set({ "n", "v" }, "<leader>er", "<CMD>ExoReview<CR>", { silent = true })
     vim.keymap.set({ "n", "v" }, "<leader>ee", "<CMD>ExoExplain<CR>", { silent = true })
@@ -43,7 +55,7 @@ local function get_visual_selection()
 end
 
 --- @param code string[]: A list of lines to be reviewed.
---- @param on_done fun(comments: string[])
+--- @param on_done fun(result)
 local review_code = function(code, on_done)
     local code_string = table.concat(code, "\n") .. "\n"
     local file_type = vim.bo.filetype
@@ -54,7 +66,7 @@ local review_code = function(code, on_done)
             vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
             return
         end
-        on_done(result.comments)
+        on_done(result)
     end)
 end
 
@@ -93,20 +105,58 @@ M.review = function()
 
     vim.notify("Reviewing selection…", vim.log.levels.INFO, { title = "Exoskeleton" })
 
-    review_code(code, function(review_comments)
-        local output_string = table.concat(review_comments, "\n") .. "\n"
+    local review_highlights = {
+        good = "ExoReviewGood",
+        okay = "ExoReviewOkay",
+        poor = "ExoReviewPoor",
+        progress = "ExoReviewInProgress",
+    }
 
-        local line = vim.fn.getline(line_num)
-        local line_length = vim.fn.strlen(line) -- this is fine i think
+    local line = vim.fn.getline(line_num)
+    local line_length = vim.fn.strlen(line) -- this is fine i think
 
-        if line_length < 1 then
-            vim.notify("Virtual text line empty!", vim.log.levels.ERROR, { title = "Exoskeleton" })
-            return
+    if line_length < 1 then
+        vim.notify("Virtual text line empty!", vim.log.levels.ERROR, { title = "Exoskeleton" })
+        return
+    end
+
+    local ext_mark_id =
+        NAV.place_mark(bufnr, NS, line_num - 1, col_num, "review in progress", review_highlights["progress"])
+
+    review_code(code, function(result)
+        local debug_string = table.concat(result.comments, "\n") .. "\n"
+        NAV.update_mark(
+            ext_mark_id,
+            bufnr,
+            NS,
+            nil,
+            nil,
+            "code quality: " .. result.quality,
+            review_highlights[result.quality]
+        )
+
+        local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, NS, ext_mark_id, {})
+        local new_mark_row = new_mark[1]
+
+        local review_comments = {}
+        local comment_string = vim.bo.commentstring
+
+        if comment_string == nil then
+            comment_string = "// %s"
         end
 
-        local ext_mark_id = NAV.place_mark(bufnr, NS, line_num - 1, col_num, output_string, "ExoReview") -- set_extmrk uses row
+        for _, comment in ipairs(result.comments) do
+            table.insert(review_comments, string.format(comment_string, comment))
+        end
+
+        vim.api.nvim_buf_set_lines(0, new_mark_row, new_mark_row, false, review_comments)
+
         vim.notify(
             string.format("Review complete: Jump to extmark %s", ext_mark_id),
+            vim.log.levels.INFO,
+            { title = "Exoskeleton" }
+        )
+        vim.notify(debug_string,
             vim.log.levels.INFO,
             { title = "Exoskeleton" }
         )
