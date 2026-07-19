@@ -17,10 +17,4 @@ NAV.delete_mark = function(bufnr, namespace, id)
     return vim.api.nvim_buf_del_extmark(bufnr, namespace, id)
 end
 
-NAV.jump_to_mark = function() end
-
-NAV.next_mark = function() end
-
-NAV.previous_mark = function() end
-
 return NAV
