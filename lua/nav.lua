@@ -1,3 +1,5 @@
+-- lowkey this file is pointless
+
 local NAV = {}
 
 NAV.list_marks = function(bufnr, namespace)

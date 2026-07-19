@@ -2,6 +2,8 @@ local M = {}
 local NS = nil
 local AI = require("ai")
 local NAV = require("nav")
+local ai_model = "ollama/devstral-small-2"
+local opencode_url = "http://localhost:4096"
 
 M.setup = function()
     NS = vim.api.nvim_create_namespace("exoskeleton")
@@ -15,7 +17,7 @@ M.setup = function()
     vim.keymap.set("n", "<leader>ed", "<CMD>ExoDeleteMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>ep", "<CMD>ExoPrevMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>en", "<CMD>ExoNextMark<CR>", { silent = true })
-    for i = 1, 9 do
+    for i = 1, 9 do -- yes you cannot jump to a mark after the 9th one. still figuring out best way to bake this idea (small jump set) into everything else
         vim.keymap.set(
             "n",
             string.format("<leader>e%d", i),
@@ -47,12 +49,12 @@ local review_code = function(code, on_done)
     local file_type = vim.bo.filetype
     local formatted_prompt = AI.create_review_prompt(file_type, code_string)
 
-    AI.get_ollama_response("http://localhost:11434", formatted_prompt, function(ai_response, err)
+    AI.get_opencode_response(opencode_url, ai_model, formatted_prompt, {}, function(result, err)
         if err then
-            vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
+            vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
             return
         end
-        on_done({ ai_response })
+        on_done(result.comments)
     end)
 end
 
@@ -149,7 +151,6 @@ M.list_marks = function()
 end
 
 M.delete_mark = function()
-    -- we need to check if there is a mark on the current line
     local bufnr = vim.api.nvim_get_current_buf()
     local line_num = vim.fn.line(".")
     local marks = NAV.list_marks(bufnr, NS)
@@ -246,18 +247,17 @@ M.jump_to_mark = function(mark_string)
         vim.notify(string.format("NaN: %s", mark_id), vim.log.levels.ERROR, { title = "Exoskeleton" })
         return
     end
-    -- check if mark is available
+
     local bufnr = vim.api.nvim_get_current_buf()
     local marks = NAV.list_marks(bufnr, NS)
 
     for _, mark in ipairs(marks) do
         if mark[1] == mark_id then
-            vim.notify(string.format("Jumping to mark %d", mark_id), vim.log.levels.INFO, { title = "Exoskeleton" })
             vim.api.nvim_win_set_cursor(0, { mark[2] + 1, mark[3] })
             return
         end
     end
-    vim.notify(string.format("Mark id %d not found", mark_id), vim.log.levels.WARN, { title = "Exoskeleton" })
+    vim.notify(string.format("Mark ID %d not found", mark_id), vim.log.levels.WARN, { title = "Exoskeleton" })
 end
 
 return M
