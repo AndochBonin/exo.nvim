@@ -9,7 +9,7 @@ M.setup = function()
     NS = vim.api.nvim_create_namespace("exoskeleton")
     vim.api.nvim_set_hl(0, "ExoReviewGood", {
         fg = "#ffffff",
-        bg = "#1fff0f",
+        bg = "#1fff0f", -- will move these colors out into vars that can be overriden by opts or something
     })
     vim.api.nvim_set_hl(0, "ExoReviewOkay", {
         fg = "#ffffff",
