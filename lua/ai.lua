@@ -1,16 +1,15 @@
 local AI = {}
 
 --- @class ExoReviewResponse
---- @field comments string[]
+--- @field comment string
 --- @field quality "good"|"okay"|"poor"
 
 AI.review_response_schema = {
 	type = "object",
 	properties = {
-		comments = {
-			type = "array",
-			items = { type = "string" },
-			description = "One-line review issues in format: <what to do>; <why>",
+		comment = {
+			type = "string",
+			description = "Brief review of the highlighted code, at most one paragraph",
 		},
 		quality = {
 			type = "string",
@@ -18,7 +17,7 @@ AI.review_response_schema = {
 			description = "Overall code quality assessment",
 		},
 	},
-	required = { "comments", "quality" },
+	required = { "comment", "quality" },
 }
 
 AI.review_system_prompt = [[
@@ -26,24 +25,30 @@ You are an expert code reviewer.
 Review code for: bugs/correctness, security, performance, style/idioms,
 architecture, error handling, concurrency, maintainability.
 
+You may read other files in the project to understand context (imports, callees,
+types), but only report issues about the highlighted range you are asked to review.
+
 Comment style:
-- Each issue is ONE short line, written like an inline code comment.
-- Use imperative, telegraphic phrasing. Drop filler words, hedges, and subjects.
-- Format per issue: <what to do>; <why>. Nothing else.
-  Good: "Remove this; unused."
-  Good: "Use == here; = is an assignment, not a comparison."
-- Only report issues with a reasonable likelihood of being real.
+- Write a SINGLE brief comment (at most one paragraph) covering the most
+  important issues in the highlighted code.
+- Be concrete and direct. Only report issues with a reasonable likelihood of
+  being real.
 
 Quality ratings:
 - "good": no meaningful issues
 - "okay": minor/style issues, no serious bugs
 - "poor": correctness, security, or significant design problems
 
-If there are no issues, return an empty comments array and quality "good".
+If there are no issues, return a short comment saying the code looks good and
+quality "good".
 ]]
 
 AI.review_prompt = [[
-Review this %s code:
+Review focuses on lines %d-%d of `%s`.
+You may read any file in the project for context, but only report issues about
+the highlighted range below.
+
+Highlighted %s code:
 
 ```
 %s
@@ -53,8 +58,13 @@ Review this %s code:
 AI.explain_prompt = [[You are a senior software engineer. Provide an answer for this prompt "%s"]]
 AI.explain_context_addition = [[in the context of this code ```%s```]]
 
-AI.create_review_prompt = function(language, code)
-	return string.format(AI.review_prompt, language, code)
+--- @param language string
+--- @param code string
+--- @param file_path string
+--- @param start_line integer
+--- @param end_line integer
+AI.create_review_prompt = function(language, code, file_path, start_line, end_line)
+	return string.format(AI.review_prompt, start_line, end_line, file_path, language, code)
 end
 
 local curl = require("plenary.curl")
@@ -146,9 +156,14 @@ local function decode_response_body(body)
 end
 
 local function show_error_buffer(lines)
-	local safe_lines = vim.tbl_map(function(line)
-		return type(line) == "string" and line or pretty_body(line)
-	end, lines)
+	local safe_lines = {}
+	for _, line in ipairs(lines) do
+		local text = type(line) == "string" and line or pretty_body(line)
+		-- nvim_buf_set_lines rejects list items containing newlines, so split them.
+		for _, sub in ipairs(vim.split(text, "\n", { plain = true })) do
+			table.insert(safe_lines, sub)
+		end
+	end
 
 	vim.cmd("botright 20new")
 	local buf = vim.api.nvim_get_current_buf()
@@ -204,13 +219,6 @@ end
 local function normalize_structured(structured)
 	if type(structured) ~= "table" then
 		return nil
-	end
-
-	if type(structured.comments) == "string" then
-		local ok, comments = pcall(vim.json.decode, structured.comments)
-		if ok and type(comments) == "table" then
-			structured.comments = comments
-		end
 	end
 
 	return structured
@@ -272,12 +280,12 @@ local function parse_review_response(response)
 		}
 	end
 
-	if type(structured.comments) ~= "table" then
+	if type(structured.comment) ~= "string" or structured.comment == "" then
 		return nil, "invalid structured response", {
 			"OpenCode request failed",
 			"",
 			"Step: parse review response",
-			"Error: structured comments is not an array",
+			"Error: structured comment is not a non-empty string",
 			"",
 			"structured:",
 			pretty_body(structured),
@@ -297,7 +305,7 @@ local function parse_review_response(response)
 	end
 
 	return {
-		comments = structured.comments,
+		comment = structured.comment,
 		quality = structured.quality,
 	}, nil, nil
 end
@@ -444,6 +452,10 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 
 			if opencode_model then
 				message_body.model = opencode_model
+			end
+
+			if opts.agent then
+				message_body.agent = opts.agent
 			end
 
 			curl.post(with_directory(base_url .. "/session/" .. session_id .. "/message", directory), {

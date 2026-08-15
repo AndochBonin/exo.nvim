@@ -4,6 +4,8 @@ local AI = require("ai")
 local NAV = require("nav")
 local ai_model = "ollama/devstral-small-2"
 local opencode_url = "http://localhost:4096"
+local review_agent = "exo-review"
+local MAX_NUM_CHARS = 60
 
 M.setup = function()
     NS = vim.api.nvim_create_namespace("exoskeleton")
@@ -54,14 +56,44 @@ local function get_visual_selection()
     }
 end
 
+--- Greedy word-wrap: split text into fragments of at most max_chars, never
+--- breaking a word. A single word longer than max_chars becomes its own fragment.
+--- @param text string
+--- @param max_chars integer
+--- @return string[]
+local function split_into_fragments(text, max_chars)
+    local fragments = {}
+    local current = ""
+
+    for word in text:gmatch("%S+") do
+        if current == "" then
+            current = word
+        elseif #current + 1 + #word <= max_chars then
+            current = current .. " " .. word
+        else
+            table.insert(fragments, current)
+            current = word
+        end
+    end
+
+    if current ~= "" then
+        table.insert(fragments, current)
+    end
+
+    return fragments
+end
+
 --- @param code string[]: A list of lines to be reviewed.
+--- @param file_path string: Path of the buffer being reviewed.
+--- @param start_line integer: First (1-indexed) line of the highlighted range.
+--- @param end_line integer: Last (1-indexed) line of the highlighted range.
 --- @param on_done fun(result)
-local review_code = function(code, on_done)
+local review_code = function(code, file_path, start_line, end_line, on_done)
     local code_string = table.concat(code, "\n") .. "\n"
     local file_type = vim.bo.filetype
-    local formatted_prompt = AI.create_review_prompt(file_type, code_string)
+    local formatted_prompt = AI.create_review_prompt(file_type, code_string, file_path, start_line, end_line)
 
-    AI.get_opencode_response(opencode_url, ai_model, formatted_prompt, {}, function(result, err)
+    AI.get_opencode_response(opencode_url, ai_model, formatted_prompt, { agent = review_agent }, function(result, err)
         if err then
             vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
             return
@@ -72,10 +104,9 @@ end
 
 --- @param selection string[]: A list of lines that were selected for a comment.
 --- @return string[]
+-- Consider adding documentation for what the `selection` parameter represents; users need context
 local explain_selection = function(selection)
-    --
-    local explanation = { "this", "is", "an", "explanation" } -- this will be the comments returned from the llm
-    return explanation
+    return selection
 end
 
 M.review = function()
@@ -97,11 +128,18 @@ M.review = function()
 
     local code = visual_selection.text
     local start_pos = visual_selection.start_pos
+    local end_pos = visual_selection.end_pos
 
     local line_num = start_pos[2]
     local col_num = start_pos[3]
+    local end_line_num = end_pos[2]
 
     local bufnr = vim.api.nvim_get_current_buf()
+
+    local file_path = vim.fn.expand("%:.")
+    if file_path == nil or file_path == "" then
+        file_path = "[unnamed buffer]"
+    end
 
     vim.notify("Reviewing selection…", vim.log.levels.INFO, { title = "Exoskeleton" })
 
@@ -123,8 +161,8 @@ M.review = function()
     local ext_mark_id =
         NAV.place_mark(bufnr, NS, line_num - 1, col_num, "review in progress", review_highlights["progress"])
 
-    review_code(code, function(result)
-        local debug_string = table.concat(result.comments, "\n") .. "\n"
+    review_code(code, file_path, line_num, end_line_num, function(result)
+        local debug_string = result.comment .. "\n"
         NAV.update_mark(
             ext_mark_id,
             bufnr,
@@ -145,8 +183,8 @@ M.review = function()
             comment_string = "// %s"
         end
 
-        for _, comment in ipairs(result.comments) do
-            table.insert(review_comments, string.format(comment_string, comment))
+        for _, fragment in ipairs(split_into_fragments(result.comment, MAX_NUM_CHARS)) do
+            table.insert(review_comments, string.format(comment_string, fragment))
         end
 
         vim.api.nvim_buf_set_lines(0, new_mark_row, new_mark_row, false, review_comments)
@@ -166,23 +204,14 @@ end
 M.explain = function()
     local mode = vim.fn.mode()
     local is_visual = mode == "v" or mode == "V" or mode == "\22" -- \22 is CTRL-V (blockwise)
-
-    local output_string = ""
+    local text_selection = {}
     if is_visual then
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
-        local text_selection = get_visual_selection().text
-        output_string = "" .. text_selection[1][2] .. ":" .. text_selection[1][3] .. " to "          -- start of selection
-        output_string = output_string ..
-        "" .. text_selection[2][2] .. ":" .. text_selection[2][3] .. "\n"                            -- end of selection
+        text_selection = get_visual_selection().text
     end
 
-    local explanation_lines = explain_selection(nil)
-    for _, comment in ipairs(explanation_lines) do
-        output_string = output_string .. "- " .. comment .. "\n"
-    end
-
-    output_string = output_string .. "\n"
-    vim.notify(output_string, vim.log.levels.INFO, { title = "Exoskeleton" })
+    local explanation_lines = explain_selection(text_selection)
+    vim.notify(table.concat(explanation_lines, "\n"), vim.log.levels.INFO, { title = "Exoskeleton" })
 end
 
 M.list_marks = function()
