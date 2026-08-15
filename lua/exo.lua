@@ -2,12 +2,35 @@ local M = {}
 local NS = nil
 local AI = require("ai")
 local NAV = require("nav")
-local ai_model = "ollama/devstral-small-2"
-local opencode_url = "http://localhost:4096"
-local review_agent = "exo-review"
+local SERVER = require("server")
 local MAX_NUM_CHARS = 60
 
-M.setup = function()
+-- User-overridable configuration (see `M.setup`). Note: `opencode_url` and
+-- `start_command` are independent — if you change the URL/port, update
+-- `start_command` to match so the auto-started server binds where we connect.
+local config = {
+    ai_model = "ollama/devstral-small-2",
+    opencode_url = "http://localhost:4096",
+    review_agent = "exo-review",
+    start_command = { "opencode", "serve", "--port", "4096" },
+    ready_timeout_ms = 10000,
+    poll_interval_ms = 250,
+}
+
+--- @param opts table|nil overrides merged over the defaults in `config`
+-- The code creates hardcoded highlight groups with colors that
+-- cannot be overridden by user configuration. The
+-- start_command handling is correct but the setup could
+-- benefit from error handling for namespace creation.
+M.setup = function(opts)
+    opts = opts or {}
+    config = vim.tbl_deep_extend("force", config, opts)
+    -- `start_command` is a list: replace it wholesale rather than index-merging
+    -- (deep-extend would splice a shorter override onto the default's tail).
+    if opts.start_command ~= nil then
+        config.start_command = opts.start_command
+    end
+
     NS = vim.api.nvim_create_namespace("exoskeleton")
     vim.api.nvim_set_hl(0, "ExoReviewGood", {
         fg = "#ffffff",
@@ -31,7 +54,7 @@ M.setup = function()
     vim.keymap.set("n", "<leader>ed", "<CMD>ExoDeleteMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>ep", "<CMD>ExoPrevMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>en", "<CMD>ExoNextMark<CR>", { silent = true })
-    for i = 1, 9 do -- yes you cannot jump to a mark after the 9th one. still figuring out best way to bake this idea (small jump set) into everything else
+    for i = 1, 9 do
         vim.keymap.set(
             "n",
             string.format("<leader>e%d", i),
@@ -39,6 +62,13 @@ M.setup = function()
             { silent = true }
         )
     end
+
+    -- Stop the opencode server on exit, but only if we started it ourselves.
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+        callback = function()
+            SERVER.stop()
+        end,
+    })
 end
 
 local function get_visual_selection()
@@ -93,12 +123,36 @@ local review_code = function(code, file_path, start_line, end_line, on_done)
     local file_type = vim.bo.filetype
     local formatted_prompt = AI.create_review_prompt(file_type, code_string, file_path, start_line, end_line)
 
-    AI.get_opencode_response(opencode_url, ai_model, formatted_prompt, { agent = review_agent }, function(result, err)
-        if err then
-            vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
+    local function run_review()
+        AI.get_opencode_response(
+            config.opencode_url,
+            config.ai_model,
+            formatted_prompt,
+            { agent = config.review_agent },
+            function(result, err)
+                if err then
+                    vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
+                    return
+                end
+                on_done(result)
+            end
+        )
+    end
+
+    -- Make sure a server is reachable first; start one if it isn't, then review.
+    SERVER.ensure_ready(config.opencode_url, config.start_command, {
+        ready_timeout_ms = config.ready_timeout_ms,
+        poll_interval_ms = config.poll_interval_ms,
+    }, function(ok, err)
+        if not ok then
+            vim.notify(
+                "could not start opencode server: " .. (err or "unknown error"),
+                vim.log.levels.ERROR,
+                { title = "Exoskeleton" }
+            )
             return
         end
-        on_done(result)
+        run_review()
     end)
 end
 
