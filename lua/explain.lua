@@ -119,7 +119,7 @@ EXPLAIN.explain = function(config, ns)
 
         local ext_mark_id = nil
         if selection_info ~= nil then
-            ext_mark_id = NAV.place_mark(bufnr, ns, start_row - 1, col, "Explaining", "ExoExplainInProgress")
+            ext_mark_id = NAV.place_mark(bufnr, ns, start_row - 1, col, " Explaining ", "ExoExplainInProgress")
         end
 
         vim.notify("Explaining…", vim.log.levels.INFO, { title = "Exoskeleton" })
@@ -158,13 +158,13 @@ EXPLAIN.explain = function(config, ns)
                             ns,
                             nil,
                             nil,
-                            "Explanation Complete: :copen to read",
+                            " Explanation Complete - :copen to read ",
                             "ExoExplainComplete"
                         )
                     end
 
                     vim.notify(
-                        "Explanation complete — run :copen to read",
+                        "Explanation Complete - run :copen to read",
                         vim.log.levels.INFO,
                         { title = "Exoskeleton" }
                     )

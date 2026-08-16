@@ -7,7 +7,12 @@ MARKS.list_marks = function(ns)
     local marks = NAV.list_marks(bufnr, ns)
     local output_string = ""
     for _, mark in pairs(marks) do
-        output_string = output_string .. mark[1] .. " line: " .. mark[2] + 1 .. "\n"
+        local details = mark[4]
+        local label = ""
+        if details and details.virt_text and details.virt_text[1] then
+            label = vim.trim(details.virt_text[1][1])
+        end
+        output_string = output_string .. string.format("[%d]: line %d %s\n", mark[1], mark[2] + 1, label)
     end
 
     if output_string == "" then

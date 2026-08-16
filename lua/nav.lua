@@ -3,7 +3,7 @@
 local NAV = {}
 
 NAV.list_marks = function(bufnr, namespace)
-    local marks = vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, {})
+    local marks = vim.api.nvim_buf_get_extmarks(bufnr, namespace, 0, -1, { details = true })
     return marks
 end
 

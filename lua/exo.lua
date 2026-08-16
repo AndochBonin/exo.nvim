@@ -33,15 +33,15 @@ M.setup = function(opts)
     NS = vim.api.nvim_create_namespace("exoskeleton")
     vim.api.nvim_set_hl(0, "ExoReviewGood", {
         fg = "#ffffff",
-        bg = "#1fff0f", -- will move these colors out into vars that can be overriden by opts or something
+        bg = "#5a9e4b", -- will move these colors out into vars that can be overriden by opts or something
     })
     vim.api.nvim_set_hl(0, "ExoReviewOkay", {
         fg = "#ffffff",
-        bg = "#f6bb00",
+        bg = "#c99a2e",
     })
     vim.api.nvim_set_hl(0, "ExoReviewPoor", {
         fg = "#ffffff",
-        bg = "#ff160c",
+        bg = "#b5453c",
     })
     vim.api.nvim_set_hl(0, "ExoReviewInProgress", {
         fg = "#ffffff",

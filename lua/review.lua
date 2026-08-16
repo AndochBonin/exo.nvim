@@ -128,16 +128,17 @@ REVIEW.review = function(config, ns)
     end
 
     local ext_mark_id =
-        NAV.place_mark(bufnr, ns, line_num - 1, col_num, "review in progress", review_highlights["progress"])
+        NAV.place_mark(bufnr, ns, line_num - 1, col_num, " Reviewing ", review_highlights["progress"])
 
     review_code(config, code, file_path, line_num, end_line_num, function(result)
+        local quality_label = result.quality:sub(1, 1):upper() .. result.quality:sub(2)
         NAV.update_mark(
             ext_mark_id,
             bufnr,
             ns,
             nil,
             nil,
-            "code quality: " .. result.quality,
+            " Review Complete - " .. quality_label .. " ",
             review_highlights[result.quality]
         )
 
@@ -158,7 +159,7 @@ REVIEW.review = function(config, ns)
         vim.api.nvim_buf_set_lines(0, new_mark_row, new_mark_row, false, review_comments)
 
         vim.notify(
-            string.format("Review complete: Jump to extmark %s", ext_mark_id),
+            string.format("Review Complete - jump to extmark %s", ext_mark_id),
             vim.log.levels.INFO,
             { title = "Exoskeleton" }
         )
