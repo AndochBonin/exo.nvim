@@ -19,16 +19,11 @@ local config = {
 }
 
 --- @param opts table|nil overrides merged over the defaults in `config`
--- The code creates hardcoded highlight groups with colors that
--- cannot be overridden by user configuration. The
--- start_command handling is correct but the setup could
--- benefit from error handling for namespace creation.
--- The highlighted code has a few issues. The hardcoded
--- highlight colors in the setup function cannot be overridden
--- by user configuration, which reduces customization options.
--- The start_command handling is correct but lacks error
--- handling for namespace creation which could lead to runtime
--- errors if the namespace creation fails.
+-- Minor comment about hardcoded hex colors. Code quality is
+-- otherwise good.
+-- The code looks good, but it should check if `SERVER` and
+-- `SERVER.stop` exist before calling them in the `VimLeavePre`
+-- autocmd to avoid potential nil errors.
 M.setup = function(opts)
     opts = opts or {}
     config = vim.tbl_deep_extend("force", config, opts)
@@ -80,6 +75,9 @@ M.setup = function(opts)
 
     -- Stop the opencode server on exit, but only if we started it ourselves.
     vim.api.nvim_create_autocmd("VimLeavePre", {
+-- The code looks good but should check if SERVER and
+-- SERVER.stop exist before calling them to avoid potential nil
+-- errors.
         callback = function()
             SERVER.stop()
         end,
@@ -177,6 +175,9 @@ end
 --- @param selection_info { file_path: string, start_row: integer, end_row: integer }|nil
 --- @param on_submit fun(question: string)
 local function open_explain_window(selection_info, on_submit)
+    -- Width first so the separator can span the full content area.
+    local width = math.min(80, math.floor(vim.o.columns * 0.6))
+
     local header = { "Explain", "" }
     if selection_info then
         table.insert(header, "File:  " .. selection_info.file_path)
@@ -186,7 +187,7 @@ local function open_explain_window(selection_info, on_submit)
     end
     table.insert(header, "Explain is read-only — your files will not be edited.")
     table.insert(header, "Type your question, then press <Enter>. <Esc>/q cancels.")
-    table.insert(header, string.rep("─", 58))
+    table.insert(header, string.rep("─", width))
 
     -- The input line sits right after the separator (0-indexed == #header).
     local input_line = #header
@@ -197,7 +198,6 @@ local function open_explain_window(selection_info, on_submit)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].bufhidden = "wipe"
 
-    local width = math.min(80, math.floor(vim.o.columns * 0.6))
     local height = #lines
     local row = math.floor((vim.o.lines - height) / 2)
     local col = math.floor((vim.o.columns - width) / 2)
@@ -302,7 +302,6 @@ M.review = function()
         NAV.place_mark(bufnr, NS, line_num - 1, col_num, "review in progress", review_highlights["progress"])
 
     review_code(code, file_path, line_num, end_line_num, function(result)
-        local debug_string = result.comment .. "\n"
         NAV.update_mark(
             ext_mark_id,
             bufnr,
@@ -331,10 +330,6 @@ M.review = function()
 
         vim.notify(
             string.format("Review complete: Jump to extmark %s", ext_mark_id),
-            vim.log.levels.INFO,
-            { title = "Exoskeleton" }
-        )
-        vim.notify(debug_string,
             vim.log.levels.INFO,
             { title = "Exoskeleton" }
         )
