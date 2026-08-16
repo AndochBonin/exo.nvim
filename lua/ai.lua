@@ -55,8 +55,49 @@ Highlighted %s code:
 ```
 ]]
 
-AI.explain_prompt = [[You are a senior software engineer. Provide an answer for this prompt "%s"]]
-AI.explain_context_addition = [[in the context of this code ```%s```]]
+AI.explain_system_prompt = [[
+You are a senior software engineer. Explain the user's question clearly and
+concisely.
+
+When a code selection and project are provided, explain the selection in the
+context of that project: you may read other files in the project (imports,
+callees, types) to ground your explanation. You may also search the web for
+up-to-date information when it helps.
+
+You are in read-only mode: never modify, create, or delete any files. Only
+explain.
+]]
+
+-- `%s` (user question). Used on its own when there is no selection.
+AI.explain_prompt = [[%s]]
+
+-- Appended after `explain_prompt` when a selection exists.
+-- Args (in order): file_path, start_line, end_line, language, code.
+AI.explain_context_addition = [[
+
+Explain in the context of lines %d-%d of `%s`.
+
+Highlighted %s code:
+
+```
+%s
+```]]
+
+--- Build the explain prompt from the user's question plus optional code context.
+--- @param user_question string
+--- @param language string
+--- @param code string|nil: joined selected lines, or nil when there is no selection
+--- @param file_path string|nil
+--- @param start_line integer|nil
+--- @param end_line integer|nil
+--- @return string
+AI.create_explain_prompt = function(user_question, language, code, file_path, start_line, end_line)
+	local prompt = string.format(AI.explain_prompt, user_question)
+	if code ~= nil and code ~= "" then
+		prompt = prompt .. string.format(AI.explain_context_addition, start_line, end_line, file_path, language, code)
+	end
+	return prompt
+end
 
 --- @param language string
 --- @param code string
@@ -333,6 +374,69 @@ local function parse_review_response(response)
 	}, nil, nil
 end
 
+--- Parse a free-text assistant message (no structured/json_schema format).
+--- Concatenates the text parts of the assistant's reply.
+--- @param response table
+--- @return string|nil, string|nil, { summary: string[], body: string|nil }|nil
+local function parse_text_response(response)
+	local data, decode_err = decode_response_body(response.body)
+	if data == nil then
+		return nil, decode_err, {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: " .. decode_err,
+			},
+			body = pretty_body(response.body),
+		}
+	end
+
+	-- Surface any nested backend error (e.g. an APIError from the model backend).
+	if data.info and data.info.error then
+		local error = data.info.error
+		local message = error.message or "explain error"
+		local label = error.name and (error.name .. ": " .. message) or message
+		local summary = {
+			"OpenCode request failed",
+			"",
+			"Step: parse explain response",
+			"Error: " .. label,
+		}
+		if error.retries ~= nil then
+			table.insert(summary, "Retries: " .. tostring(error.retries))
+		end
+		return nil, message, {
+			summary = summary,
+			body = pretty_body(response.body),
+		}
+	end
+
+	local chunks = {}
+	if type(data.parts) == "table" then
+		for _, part in ipairs(data.parts) do
+			if part.type == "text" and type(part.text) == "string" and part.text ~= "" then
+				table.insert(chunks, part.text)
+			end
+		end
+	end
+
+	local text = vim.trim(table.concat(chunks, "\n"))
+	if text == "" then
+		return nil, "empty explanation", {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: no text output in response",
+			},
+			body = pretty_body(response.body),
+		}
+	end
+
+	return text, nil, nil
+end
+
 --- @param on_done fun(response: string|nil, err: string|nil)
 AI.get_ollama_response = function(base_url, model, prompt, on_done)
 	base_url = base_url or "http://localhost:11434"
@@ -379,8 +483,11 @@ end
 --- @param base_url string|nil
 --- @param model string|{ providerID: string, modelID: string }|nil
 --- @param prompt string
---- @param opts table|nil
---- @param on_done fun(response: ExoReviewResponse|nil, err: string|nil)
+--- @param opts table|nil: may set `agent`, `system`, `title`, `directory`,
+---   `timeout`, plus `format` (json_schema table, or `false` to omit and get free
+---   text) and `parse` (a `fun(response): result, err, err_detail`). Defaults keep
+---   the review json_schema + parser for backward compatibility.
+--- @param on_done fun(response: any|nil, err: string|nil)
 AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 	base_url = base_url or "http://localhost:4096"
 	opts = opts or {}
@@ -389,6 +496,8 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		on_done(nil, "empty prompt")
 		return
 	end
+
+	local parse = opts.parse or parse_review_response
 
 	local opencode_model = parse_model(model)
 	if model ~= nil and model ~= "" and opencode_model == nil then
@@ -439,7 +548,7 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 
 	curl.post(with_directory(base_url .. "/session", directory), {
 		headers = headers,
-		body = vim.json.encode({ title = "exo-review" }),
+		body = vim.json.encode({ title = opts.title or "exo-review" }),
 		timeout = timeout,
 		callback = function(session_response)
 			if session_response.status ~= 200 then
@@ -469,12 +578,19 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 			local message_body = {
 				system = opts.system or AI.review_system_prompt,
 				parts = { { type = "text", text = prompt } },
-				format = {
+			}
+
+			-- `opts.format == false` omits the json_schema (free-text reply); an
+			-- explicit table overrides; nil keeps the default review schema.
+			if opts.format ~= nil then
+				message_body.format = opts.format or nil
+			else
+				message_body.format = {
 					type = "json_schema",
 					schema = AI.review_response_schema,
 					retryCount = 2,
-				},
-			}
+				}
+			end
 
 			if opencode_model then
 				message_body.model = opencode_model
@@ -499,8 +615,8 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 						return
 					end
 
-					local review_response, err, err_detail = parse_review_response(message_response)
-					finish(review_response, err, err_detail, session_id)
+					local parsed, err, err_detail = parse(message_response)
+					finish(parsed, err, err_detail, session_id)
 				end,
 				on_error = function(err)
 					finish(nil, err.message or "request failed", build_curl_error("send message", err), session_id)
@@ -511,6 +627,25 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 			finish(nil, err.message or "request failed", build_curl_error("create session", err))
 		end,
 	})
+end
+
+--- Request a free-text explanation. Thin wrapper over `get_opencode_response`
+--- that omits the json_schema format and parses plain assistant text, defaulting
+--- the system prompt to `AI.explain_system_prompt` and the session title to
+--- "exo-explain".
+--- @param base_url string|nil
+--- @param model string|{ providerID: string, modelID: string }|nil
+--- @param prompt string
+--- @param opts table|nil: may set `agent`, `system`, `directory`, `timeout`.
+--- @param on_done fun(response: string|nil, err: string|nil)
+AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
+	opts = vim.tbl_extend("force", {
+		system = AI.explain_system_prompt,
+		title = "exo-explain",
+	}, opts or {})
+	opts.format = false
+	opts.parse = parse_text_response
+	AI.get_opencode_response(base_url, model, prompt, opts, on_done)
 end
 
 return AI
