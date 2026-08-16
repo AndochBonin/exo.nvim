@@ -64,9 +64,31 @@ context of that project: you may read other files in the project (imports,
 callees, types) to ground your explanation. You may also search the web for
 up-to-date information when it helps.
 
+Return a short `title` (3-8 words) summarizing the explanation, and the full
+`explanation` itself formatted as Markdown.
+
 You are in read-only mode: never modify, create, or delete any files. Only
 explain.
 ]]
+
+--- @class ExoExplainResponse
+--- @field title string
+--- @field explanation string
+
+AI.explain_response_schema = {
+	type = "object",
+	properties = {
+		title = {
+			type = "string",
+			description = "A short (3-8 word) title summarizing the explanation",
+		},
+		explanation = {
+			type = "string",
+			description = "The full explanation, formatted as Markdown",
+		},
+	},
+	required = { "title", "explanation" },
+}
 
 -- `%s` (user question). Used on its own when there is no selection.
 AI.explain_prompt = [[%s]]
@@ -374,11 +396,10 @@ local function parse_review_response(response)
 	}, nil, nil
 end
 
---- Parse a free-text assistant message (no structured/json_schema format).
---- Concatenates the text parts of the assistant's reply.
+--- Parse a structured explain response ({ title, explanation }).
 --- @param response table
---- @return string|nil, string|nil, { summary: string[], body: string|nil }|nil
-local function parse_text_response(response)
+--- @return ExoExplainResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
+local function parse_explain_response(response)
 	local data, decode_err = decode_response_body(response.body)
 	if data == nil then
 		return nil, decode_err, {
@@ -412,29 +433,47 @@ local function parse_text_response(response)
 		}
 	end
 
-	local chunks = {}
-	if type(data.parts) == "table" then
-		for _, part in ipairs(data.parts) do
-			if part.type == "text" and type(part.text) == "string" and part.text ~= "" then
-				table.insert(chunks, part.text)
-			end
-		end
-	end
-
-	local text = vim.trim(table.concat(chunks, "\n"))
-	if text == "" then
-		return nil, "empty explanation", {
+	local structured = extract_structured(data)
+	if type(structured) ~= "table" then
+		return nil, "invalid structured response", {
 			summary = {
 				"OpenCode request failed",
 				"",
 				"Step: parse explain response",
-				"Error: no text output in response",
+				"Error: missing structured explain output",
 			},
 			body = pretty_body(response.body),
 		}
 	end
 
-	return text, nil, nil
+	if type(structured.title) ~= "string" or structured.title == "" then
+		return nil, "invalid structured response", {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: structured title is not a non-empty string",
+			},
+			body = pretty_body(structured),
+		}
+	end
+
+	if type(structured.explanation) ~= "string" or structured.explanation == "" then
+		return nil, "invalid structured response", {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: structured explanation is not a non-empty string",
+			},
+			body = pretty_body(structured),
+		}
+	end
+
+	return {
+		title = structured.title,
+		explanation = structured.explanation,
+	}, nil, nil
 end
 
 --- @param on_done fun(response: string|nil, err: string|nil)
@@ -629,22 +668,26 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 	})
 end
 
---- Request a free-text explanation. Thin wrapper over `get_opencode_response`
---- that omits the json_schema format and parses plain assistant text, defaulting
---- the system prompt to `AI.explain_system_prompt` and the session title to
---- "exo-explain".
+--- Request a structured explanation ({ title, explanation }). Thin wrapper over
+--- `get_opencode_response` that uses the explain json_schema and parser,
+--- defaulting the system prompt to `AI.explain_system_prompt` and the session
+--- title to "exo-explain".
 --- @param base_url string|nil
 --- @param model string|{ providerID: string, modelID: string }|nil
 --- @param prompt string
 --- @param opts table|nil: may set `agent`, `system`, `directory`, `timeout`.
---- @param on_done fun(response: string|nil, err: string|nil)
+--- @param on_done fun(response: ExoExplainResponse|nil, err: string|nil)
 AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 	opts = vim.tbl_extend("force", {
 		system = AI.explain_system_prompt,
 		title = "exo-explain",
 	}, opts or {})
-	opts.format = false
-	opts.parse = parse_text_response
+	opts.format = {
+		type = "json_schema",
+		schema = AI.explain_response_schema,
+		retryCount = 2,
+	}
+	opts.parse = parse_explain_response
 	AI.get_opencode_response(base_url, model, prompt, opts, on_done)
 end
 

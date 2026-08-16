@@ -2,6 +2,7 @@ local EXPLAIN = {}
 local AI = require("ai")
 local NAV = require("nav")
 local SERVER = require("server")
+local STORE = require("store")
 local UTIL = require("util")
 
 --- Open a centered floating input window for an explain request. Shows the
@@ -130,26 +131,34 @@ EXPLAIN.explain = function(config, ns)
                 config.ai_model,
                 prompt,
                 { agent = config.explain_agent },
-                function(explanation, err)
+                function(response, err)
                     if err then
                         vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
                         return
                     end
 
-                    local qf_title = selection_info ~= nil
-                            and string.format("Exo Explain: %s:%d-%d", file_path, start_row, end_row)
-                        or "Exo Explain"
-
-                    local items = {}
-                    for _, line in ipairs(vim.split(explanation, "\n", { plain = true })) do
-                        local item = { text = line }
-                        if selection_info ~= nil then
-                            item.bufnr = bufnr
-                            item.lnum = start_row
-                        end
-                        table.insert(items, item)
+                    local path, write_err = STORE.write_explanation({
+                        title = response.title,
+                        body = response.explanation,
+                        source = selection_info,
+                        bufnr = bufnr,
+                    })
+                    if write_err then
+                        vim.notify(write_err, vim.log.levels.ERROR, { title = "Exoskeleton" })
+                        return
                     end
-                    vim.fn.setqflist({}, "r", { title = qf_title, items = items })
+
+                    -- Append a single one-line index entry; selecting it opens the
+                    -- saved explanation file.
+                    local location = selection_info ~= nil
+                            and string.format("%s:%d-%d", file_path, start_row, end_row)
+                        or "(no selection)"
+                    vim.fn.setqflist({}, "a", {
+                        title = "Exo Explanations",
+                        items = {
+                            { filename = path, lnum = 1, text = response.title .. "  —  " .. location },
+                        },
+                    })
 
                     if ext_mark_id ~= nil then
                         NAV.update_mark(
@@ -158,13 +167,13 @@ EXPLAIN.explain = function(config, ns)
                             ns,
                             nil,
                             nil,
-                            " Explanation Complete - :copen to read ",
+                            " Explanation Saved - :copen to open ",
                             "ExoExplainComplete"
                         )
                     end
 
                     vim.notify(
-                        "Explanation Complete - run :copen to read",
+                        "Explanation saved - run :copen to open",
                         vim.log.levels.INFO,
                         { title = "Exoskeleton" }
                     )
