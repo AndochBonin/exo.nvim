@@ -5,6 +5,10 @@ local SERVER = require("server")
 local STORE = require("store")
 local UTIL = require("util")
 
+-- Namespace for highlights inside the explain input float (kept separate from the
+-- exoskeleton extmark namespace used on source buffers).
+local FLOAT_NS = vim.api.nvim_create_namespace("exo_explain_float")
+
 --- Open a centered floating input window for an explain request. Shows the
 --- selection details (when any) and a read-only disclaimer, then calls
 --- `on_submit(question)` with the typed prompt when the user presses <Enter>.
@@ -14,15 +18,13 @@ local function open_explain_window(selection_info, on_submit)
     -- Width first so the separator can span the full content area.
     local width = math.min(80, math.floor(vim.o.columns * 0.6))
 
-    local header = { "Explain", "" }
+    local header = {}
     if selection_info then
         table.insert(header, "File:  " .. selection_info.file_path)
         table.insert(header, string.format("Lines: %d-%d", selection_info.start_row, selection_info.end_row))
     else
         table.insert(header, "No selection — asking a general question.")
     end
-    table.insert(header, "Explain is read-only — your files will not be edited.")
-    table.insert(header, "Type your question, then press <Enter>. <Esc>/q cancels.")
     table.insert(header, string.rep("─", width))
 
     -- The input line sits right after the separator (0-indexed == #header).
@@ -33,6 +35,12 @@ local function open_explain_window(selection_info, on_submit)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].bufhidden = "wipe"
+
+    -- Tint every line teal except the input line (all header lines: the info
+    -- line(s) and the separator, indices 0 .. input_line - 1).
+    for lnum = 0, input_line - 1 do
+        vim.api.nvim_buf_set_extmark(buf, FLOAT_NS, lnum, 0, { line_hl_group = "ExoExplainText" })
+    end
 
     local height = #lines
     local row = math.floor((vim.o.lines - height) / 2)
@@ -46,7 +54,7 @@ local function open_explain_window(selection_info, on_submit)
         col = col,
         border = "rounded",
         style = "minimal",
-        title = " Explain ",
+        title = { { " Explain ", "ExoExplainTitle" } },
         title_pos = "center",
     })
 

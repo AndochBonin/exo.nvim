@@ -55,6 +55,13 @@ M.setup = function(opts)
         fg = "#ffffff",
         bg = "#1f8f8f", -- teal, denotes a finished explanation
     })
+    vim.api.nvim_set_hl(0, "ExoExplainTitle", {
+        fg = "#1f8f8f", -- teal, matches the explain accent
+        bold = true,
+    })
+    vim.api.nvim_set_hl(0, "ExoExplainText", {
+        fg = "#1f8f8f", -- teal, matches the title
+    })
     vim.keymap.set({ "n", "v" }, "<leader>er", "<CMD>ExoReview<CR>", { silent = true })
     vim.keymap.set({ "n", "v" }, "<leader>ee", "<CMD>ExoExplain<CR>", { silent = true })
     vim.keymap.set("n", "<leader>el", "<CMD>ExoListMarks<CR>", { silent = true })
