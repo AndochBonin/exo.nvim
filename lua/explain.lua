@@ -100,6 +100,9 @@ EXPLAIN.explain = function(config, ns)
     local is_visual = mode == "v" or mode == "V" or mode == "\22" -- \22 is CTRL-V (blockwise)
 
     local bufnr = vim.api.nvim_get_current_buf()
+    -- Capture the cursor line now; with no selection the extmark is placed here,
+    -- and by submit time the cursor has moved through the input float.
+    local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
     local file_path = vim.fn.expand("%:.")
     if file_path == nil or file_path == "" then
         file_path = "[unnamed buffer]"
@@ -126,10 +129,11 @@ EXPLAIN.explain = function(config, ns)
     open_explain_window(selection_info, function(question)
         local prompt = AI.create_explain_prompt(question, file_type, code_string, file_path, start_row, end_row)
 
-        local ext_mark_id = nil
-        if selection_info ~= nil then
-            ext_mark_id = NAV.place_mark(bufnr, ns, start_row - 1, col, " Explaining ", "ExoExplainInProgress")
-        end
+        -- With a selection, mark the selection's first line; otherwise mark the
+        -- line the cursor was on when explain was invoked. The label sits at EOL.
+        local mark_row = selection_info ~= nil and (start_row - 1) or (cursor_row - 1)
+        local mark_col = selection_info ~= nil and col or 0
+        local ext_mark_id = NAV.place_mark(bufnr, ns, mark_row, mark_col, " Explaining ", "ExoExplainInProgress")
 
         vim.notify("Explaining…", vim.log.levels.INFO, { title = "Exoskeleton" })
 
