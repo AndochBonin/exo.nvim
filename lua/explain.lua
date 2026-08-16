@@ -5,8 +5,8 @@ local SERVER = require("server")
 local STORE = require("store")
 local UTIL = require("util")
 
--- Namespace for highlights inside the explain input float (kept separate from the
--- exoskeleton extmark namespace used on source buffers).
+--- Namespace for highlights inside the explain input float (kept separate from the
+--- exoskeleton extmark namespace used on source buffers).
 local FLOAT_NS = vim.api.nvim_create_namespace("exo_explain_float")
 
 --- Open a centered floating input window for an explain request. Shows the
@@ -162,7 +162,7 @@ EXPLAIN.explain = function(config, ns)
                             and string.format("%s:%d-%d", file_path, start_row, end_row)
                         or "(no selection)"
                     vim.fn.setqflist({}, "a", {
-                        title = "Exo Explanations",
+                        title = "Exo",
                         items = {
                             { filename = path, lnum = 1, text = response.title .. "  —  " .. location },
                         },

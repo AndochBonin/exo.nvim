@@ -158,8 +158,16 @@ REVIEW.review = function(config, ns)
 
         vim.api.nvim_buf_set_lines(0, new_mark_row, new_mark_row, false, review_comments)
 
+        -- Append the review location to the shared "Exo" quickfix list.
+        vim.fn.setqflist({}, "a", {
+            title = "Exo",
+            items = {
+                { bufnr = bufnr, lnum = line_num, text = "Code Review - " .. quality_label },
+            },
+        })
+
         vim.notify(
-            string.format("Review Complete - jump to extmark %s", ext_mark_id),
+            "Review Complete - run :copen to view",
             vim.log.levels.INFO,
             { title = "Exoskeleton" }
         )

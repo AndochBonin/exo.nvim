@@ -64,18 +64,9 @@ M.setup = function(opts)
     })
     vim.keymap.set({ "n", "v" }, "<leader>er", "<CMD>ExoReview<CR>", { silent = true })
     vim.keymap.set({ "n", "v" }, "<leader>ee", "<CMD>ExoExplain<CR>", { silent = true })
-    vim.keymap.set("n", "<leader>el", "<CMD>ExoListMarks<CR>", { silent = true })
     vim.keymap.set("n", "<leader>ed", "<CMD>ExoDeleteMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>ep", "<CMD>ExoPrevMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>en", "<CMD>ExoNextMark<CR>", { silent = true })
-    for i = 1, 9 do
-        vim.keymap.set(
-            "n",
-            string.format("<leader>e%d", i),
-            string.format("<CMD>ExoJumpToMark %d<CR>", i),
-            { silent = true }
-        )
-    end
 
     -- Stop the opencode server on exit, but only if we started it ourselves.
     vim.api.nvim_create_autocmd("VimLeavePre", {
@@ -96,10 +87,6 @@ M.explain = function()
     require("explain").explain(config, NS)
 end
 
-M.list_marks = function()
-    require("marks").list_marks(NS)
-end
-
 M.delete_mark = function()
     require("marks").delete_mark(NS)
 end
@@ -110,10 +97,6 @@ end
 
 M.jump_next_mark = function()
     require("marks").jump_next_mark(NS)
-end
-
-M.jump_to_mark = function(mark_string)
-    require("marks").jump_to_mark(NS, mark_string)
 end
 
 return M

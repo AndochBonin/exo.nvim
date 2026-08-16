@@ -74,21 +74,13 @@ must be reachable (e.g. `ollama serve` running).
 ## Explain: &lt;leader&gt; ee
 - Opens a centered floating window with a text input field. When you trigger it
   from a visual selection, the window shows the selection details (file name,
-  start/end rows); it also shows a disclaimer that explain mode is read-only and
-  will not edit your files. Explain also works from normal mode with no selection
-  (a general question).
+  start/end rows); Explain also works from normal mode with no selection (a general question).
 - Type your question and press Enter. The window closes and, if you had a
   selection, an extmark labelled "Explaining" is left at the selection site.
 - The agent explains your question in the context of the project (and may search
   the web). When it finishes, the explanation is loaded into the quickfix list
   (open it with `:copen`), a notification fires, and the extmark changes to
   "Explanation Complete: :copen to read".
-
-## List extmarks (normal mode): &lt;leader&gt; el
-- Vim notification showing extmark ids and line positions
-
-## Jump to extmark (normal mode): &lt;leader&gt; e[1-9]
-- Jumps to the provided extmark id - only works for 1-9 range (if you have more extmarks than that you need to start dealing with your code reviews)
 
 ## Previous extmark (normal mode): &lt;leader&gt; ep
 - Jumps to the closest extmark above the cursor
