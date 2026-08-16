@@ -131,7 +131,7 @@ local review_code = function(code, file_path, start_line, end_line, on_done)
             { agent = config.review_agent },
             function(result, err)
                 if err then
-                    vim.notify(err .. " (see Exo OpenCode Error buffer)", vim.log.levels.ERROR, { title = "Exoskeleton" })
+                    vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
                     return
                 end
                 on_done(result)

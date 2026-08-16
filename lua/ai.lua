@@ -155,47 +155,62 @@ local function decode_response_body(body)
 	return data, nil
 end
 
-local function show_error_buffer(lines)
-	local safe_lines = {}
-	for _, line in ipairs(lines) do
-		local text = type(line) == "string" and line or pretty_body(line)
-		-- nvim_buf_set_lines rejects list items containing newlines, so split them.
-		for _, sub in ipairs(vim.split(text, "\n", { plain = true })) do
-			table.insert(safe_lines, sub)
-		end
+-- Errors are represented as { summary = { <short lines> }, body = <raw dump|nil> }.
+-- The summary is shown in the notification; the body is logged for debugging only.
+local function normalize_error(err)
+	if type(err) == "string" then
+		return { summary = { err } }
 	end
+	if type(err) == "table" and err.summary == nil then
+		-- Legacy: a plain array of lines.
+		return { summary = err }
+	end
+	return err
+end
 
-	vim.cmd("botright 20new")
-	local buf = vim.api.nvim_get_current_buf()
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, safe_lines)
-	vim.api.nvim_buf_set_name(buf, "Exo OpenCode Error")
-	vim.bo[buf].filetype = "log"
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].modifiable = false
+local function format_error(err)
+	err = normalize_error(err)
+	local parts = {}
+	for _, line in ipairs(err.summary or {}) do
+		table.insert(parts, type(line) == "string" and line or pretty_body(line))
+	end
+	return table.concat(parts, "\n")
+end
+
+-- Write the full error (summary + raw body) to :messages history without popping a
+-- notification, so the detail stays retrievable while the notification stays concise.
+local function log_full(err)
+	err = normalize_error(err)
+	if err.body == nil then
+		return
+	end
+	local text = format_error(err) .. "\n\n" .. (type(err.body) == "string" and err.body or pretty_body(err.body))
+	vim.schedule(function()
+		vim.api.nvim_echo({ { text } }, true, {})
+	end)
 end
 
 local function build_http_error(step, response)
 	return {
-		"OpenCode request failed",
-		"",
-		"Step: " .. step,
-		"Status: " .. tostring(response.status),
-		"",
-		"Body:",
-		pretty_body(response.body),
+		summary = {
+			"OpenCode request failed",
+			"",
+			"Step: " .. step,
+			"Status: " .. tostring(response.status),
+		},
+		body = pretty_body(response.body),
 	}
 end
 
 local function build_curl_error(step, err)
 	return {
-		"OpenCode request failed",
-		"",
-		"Step: " .. step,
-		"Error: " .. (err.message or "request failed"),
-		"",
-		"Details:",
-		vim.inspect(err),
+		summary = {
+			"OpenCode request failed",
+			"",
+			"Step: " .. step,
+			"Error: " .. (err.message or "request failed"),
+		},
+		body = vim.inspect(err),
 	}
 end
 
@@ -239,68 +254,76 @@ local function extract_structured(data)
 end
 
 --- @param response table
---- @return ExoReviewResponse|nil, string|nil, string[]|nil
+--- @return ExoReviewResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
 local function parse_review_response(response)
 	local data, decode_err = decode_response_body(response.body)
 	if data == nil then
 		return nil, decode_err, {
-			"OpenCode request failed",
-			"",
-			"Step: parse review response",
-			"Error: " .. decode_err,
-			"",
-			"Body:",
-			pretty_body(response.body),
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse review response",
+				"Error: " .. decode_err,
+			},
+			body = pretty_body(response.body),
 		}
 	end
 
-	if data.info and data.info.error and data.info.error.name == "StructuredOutputError" then
-		return nil, data.info.error.message or "structured output error", {
+	-- Any nested error carries the real cause (e.g. an APIError from the model backend).
+	-- Surface its name/message instead of falling through to the generic body dump.
+	if data.info and data.info.error then
+		local error = data.info.error
+		local message = error.message or "structured output error"
+		local label = error.name and (error.name .. ": " .. message) or message
+		local summary = {
 			"OpenCode request failed",
 			"",
 			"Step: parse review response",
-			"Error: " .. (data.info.error.message or "structured output error"),
-			"Retries: " .. tostring(data.info.error.retries or "?"),
-			"",
-			"Response:",
-			pretty_body(response.body),
+			"Error: " .. label,
+		}
+		if error.retries ~= nil then
+			table.insert(summary, "Retries: " .. tostring(error.retries))
+		end
+		return nil, message, {
+			summary = summary,
+			body = pretty_body(response.body),
 		}
 	end
 
 	local structured = extract_structured(data)
 	if type(structured) ~= "table" then
 		return nil, "invalid structured response", {
-			"OpenCode request failed",
-			"",
-			"Step: parse review response",
-			"Error: missing structured review output",
-			"",
-			"Response:",
-			pretty_body(response.body),
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse review response",
+				"Error: missing structured review output",
+			},
+			body = pretty_body(response.body),
 		}
 	end
 
 	if type(structured.comment) ~= "string" or structured.comment == "" then
 		return nil, "invalid structured response", {
-			"OpenCode request failed",
-			"",
-			"Step: parse review response",
-			"Error: structured comment is not a non-empty string",
-			"",
-			"structured:",
-			pretty_body(structured),
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse review response",
+				"Error: structured comment is not a non-empty string",
+			},
+			body = pretty_body(structured),
 		}
 	end
 
 	if not VALID_QUALITIES[structured.quality] then
 		return nil, "invalid quality value", {
-			"OpenCode request failed",
-			"",
-			"Step: parse review response",
-			"Error: invalid quality value: " .. tostring(structured.quality),
-			"",
-			"structured:",
-			pretty_body(structured),
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse review response",
+				"Error: invalid quality value: " .. tostring(structured.quality),
+			},
+			body = pretty_body(structured),
 		}
 	end
 
@@ -398,7 +421,10 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		local function call_done()
 			vim.schedule(function()
 				if err then
-					show_error_buffer(err_detail or { err })
+					local detail = err_detail or { summary = { err } }
+					log_full(detail)
+					on_done(response, format_error(detail))
+					return
 				end
 				on_done(response, err)
 			end)
@@ -428,13 +454,13 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 			local ok, session_data = pcall(vim.json.decode, session_response.body)
 			if not ok or type(session_data.id) ~= "string" then
 				finish(nil, "error creating session", {
-					"OpenCode request failed",
-					"",
-					"Step: create session",
-					"Error: response missing session id",
-					"",
-					"Body:",
-					pretty_body(session_response.body),
+					summary = {
+						"OpenCode request failed",
+						"",
+						"Step: create session",
+						"Error: response missing session id",
+					},
+					body = pretty_body(session_response.body),
 				})
 				return
 			end
