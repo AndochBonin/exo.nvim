@@ -23,8 +23,31 @@ require("exo").setup({
   explain_agent = "exo-explain",
   ready_timeout_ms = 10000, -- how long to wait for the server to come up
   poll_interval_ms = 250,
+  -- Remap the theme group any Exo highlight derives from. Badge groups are
+  -- white text over the source group's fg; the float groups link directly.
+  highlights = {
+    review_good = "DiagnosticOk",
+    explain_complete = "DiagnosticHint",
+    explain_text = "Comment",
+  },
 })
 ```
+
+### Highlights
+
+Exo's labels follow your colorscheme instead of hardcoding colors:
+
+- **Badges** (`ExoReviewGood`/`Okay`/`Poor`, `ExoReviewInProgress`,
+  `ExoExplainInProgress`, `ExoExplainComplete`) — white text on the fg color of a
+  theme group (`DiagnosticOk`/`Warn`/`Error`/`Info`/`Hint` by default). If the
+  theme doesn't define the source group, the previous fixed color is used.
+- **Explain float** (`ExoExplainTitle`, `ExoExplainText`) — link to
+  `FloatTitle` and `Comment`.
+
+Every source is overridable via `setup({ highlights = { ... } })` with the keys
+`review_good`, `review_okay`, `review_poor`, `review_in_progress`,
+`explain_in_progress`, `explain_complete`, `explain_title`, `explain_text`.
+Colors re-derive automatically when you switch `:colorscheme`.
 
 ### Required OpenCode config
 

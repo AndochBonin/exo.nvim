@@ -18,6 +18,7 @@ plus manually exercising `:ExoReview` / `:ExoExplain` in a real Neovim session a
 - `lua/exo.lua` — hub: config defaults, highlight groups, keymaps, `VimLeavePre` server shutdown. All features go through it.
 - Flow for review and explain: `lua/server.lua` `ensure_ready` (ping `/session`; if down, spawn `start_command` and poll) → `lua/ai.lua` `get_opencode_response` (POST `/session`, then POST `/session/<id>/message`, then DELETE the session). Responses come back as structured output (`json_schema` + `retryCount`); per-feature schemas, system prompts, and response parsers live in `ai.lua`. `review.lua` inserts comment lines into the buffer; `explain.lua` saves to a file via `store.lua`.
 - `lua/nav.lua` / `lua/marks.lua` — extmark placement/jump/delete in namespace `exoskeleton`.
+- Highlights: `exo.lua` derives badge groups (white fg) from `Diagnostic*` fg colors and links the float groups to `FloatTitle`/`Comment`; re-derived on every `ColorScheme` event. Sources are per-key overridable via `setup({ highlights = ... })`.
 
 ## Gotchas
 
