@@ -6,7 +6,8 @@ local SERVER = require("server")
 -- `start_command` are independent — if you change the URL/port, update
 -- `start_command` to match so the auto-started server binds where we connect.
 local config = {
-    ai_model = "ollama/devstral-small-2",
+    review_model = "opencode-go/gpt-5.6-luna",
+    explain_model = "opencode-go/gpt-5.6-luna",
     opencode_url = "http://localhost:4096",
     review_agent = "exo-review",
     explain_agent = "exo-explain",

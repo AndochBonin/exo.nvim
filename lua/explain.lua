@@ -140,7 +140,7 @@ EXPLAIN.explain = function(config, ns)
         local function run_explain()
             AI.get_opencode_explanation(
                 config.opencode_url,
-                config.ai_model,
+                config.explain_model,
                 prompt,
                 { agent = config.explain_agent, retry_count = config.retry_count },
                 function(response, err)
@@ -162,8 +162,7 @@ EXPLAIN.explain = function(config, ns)
 
                     -- Append a single one-line index entry; selecting it opens the
                     -- saved explanation file.
-                    local location = selection_info ~= nil
-                            and string.format("%s:%d-%d", file_path, start_row, end_row)
+                    local location = selection_info ~= nil and string.format("%s:%d-%d", file_path, start_row, end_row)
                         or "(no selection)"
                     vim.fn.setqflist({}, "a", {
                         title = "Exo",
@@ -184,11 +183,7 @@ EXPLAIN.explain = function(config, ns)
                         )
                     end
 
-                    vim.notify(
-                        "Explanation saved - run :copen to open",
-                        vim.log.levels.INFO,
-                        { title = "Exoskeleton" }
-                    )
+                    vim.notify("Explanation saved - run :copen to open", vim.log.levels.INFO, { title = "Exoskeleton" })
                 end
             )
         end

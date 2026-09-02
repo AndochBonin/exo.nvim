@@ -46,7 +46,7 @@ local review_code = function(config, code, file_path, start_line, end_line, on_d
     local function run_review()
         AI.get_opencode_response(
             config.opencode_url,
-            config.ai_model,
+            config.review_model,
             formatted_prompt,
             { agent = config.review_agent, retry_count = config.retry_count },
             function(result, err)

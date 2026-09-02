@@ -17,7 +17,8 @@ require("exo").setup({
   opencode_url = "http://localhost:4096",
   -- Keep start_command in sync with opencode_url's port.
   start_command = { "opencode", "serve", "--port", "4096" },
-  ai_model = "ollama/devstral-small-2",
+  review_model = "opencode-go/gpt-5.6-luna",
+  explain_model = "opencode-go/gpt-5.6-luna",
   review_agent = "exo-review",
   explain_agent = "exo-explain",
   ready_timeout_ms = 10000, -- how long to wait for the server to come up
@@ -27,26 +28,22 @@ require("exo").setup({
 
 ### Required OpenCode config
 
-Your OpenCode config (`~/.config/opencode/opencode.json`, or a project
-`opencode.json`) **must** define the model provider Exo uses plus an `exo-review`
-agent (for reviews) and an `exo-explain` agent (for explanations). If a referenced
-agent is missing, the request fails with an opaque `500 UnknownError` from the
-server — OpenCode throws before it ever reaches a model, so the notification/error
-buffer won't spell out the cause.
+Models come from a provider connected to your OpenCode install — e.g. opencode go
+via `opencode auth login`. Known providers need no `provider` block in the config;
+run `opencode models` to list the exact `provider/model` IDs you can use.
 
-A complete config (Ollama provider + both agents) looks like:
+Your OpenCode config (`~/.config/opencode/opencode.json`, or a project
+`opencode.json`) **must** define an `exo-review` agent (for reviews) and an
+`exo-explain` agent (for explanations). If a referenced agent is missing, the
+request fails with an opaque `500 UnknownError` from the server — OpenCode throws
+before it ever reaches a model, so the notification/error buffer won't spell out
+the cause.
+
+A complete config (both agents) looks like:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "ollama": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Ollama",
-      "options": { "baseURL": "http://localhost:11434/v1" },
-      "models": { "devstral-small-2": { "name": "devstral-small-2" } }
-    }
-  },
   "agent": {
     "exo-review": {
       "permission": { "*": "allow", "edit": "deny" }
@@ -63,9 +60,10 @@ project-specific tooling — including a web-search/`webfetch` tool, which expla
 relies on — works) while `edit` (which covers `edit`/`write`/`patch`) is denied,
 guaranteeing neither a review nor an explanation can modify your files. Review
 focuses on your highlighted selection but may read the rest of the project for
-context; explain may read the project and search the web. The provider/model must
-match `ai_model` in `setup` (default `ollama/devstral-small-2`), and that model
-must be reachable (e.g. `ollama serve` running).
+context; explain may read the project and search the web. The `provider/model`
+IDs must match `review_model` / `explain_model` in `setup` (default
+`opencode-go/gpt-5.6-luna` for both), and the provider must be authenticated
+(e.g. your opencode go key connected via `opencode auth login`).
 
 ## Review (visual mode): &lt;leader&gt; er
 - Review the visually selected code section. Leaves an extmark labelled "review in progress" at the review site for easy navigation (see below).
