@@ -1,5 +1,6 @@
 local REVIEW = {}
 local AI = require("ai")
+local MARKS = require("marks")
 local NAV = require("nav")
 local SERVER = require("server")
 local UTIL = require("util")
@@ -37,43 +38,74 @@ end
 --- @param file_path string: Path of the buffer being reviewed.
 --- @param start_line integer: First (1-indexed) line of the highlighted range.
 --- @param end_line integer: Last (1-indexed) line of the highlighted range.
---- @param on_done fun(result)
+--- @param on_done fun(result: table|nil, err: string|nil)
+--- @return fun() cancel
 local review_code = function(config, code, file_path, start_line, end_line, on_done)
     local code_string = table.concat(code, "\n") .. "\n"
     local file_type = vim.bo.filetype
     local formatted_prompt = AI.create_review_prompt(file_type, code_string, file_path, start_line, end_line)
+    local cancelled = false
+    local finished = false
+    local ready_cancel = nil
+    local ai_cancel = nil
+
+    local function finish(result, err)
+        if cancelled or finished then
+            return
+        end
+        finished = true
+        on_done(result, err)
+    end
+
+    local function cancel()
+        if cancelled or finished then
+            return
+        end
+        cancelled = true
+        if ready_cancel then
+            ready_cancel()
+        end
+        if ai_cancel then
+            ai_cancel()
+        end
+    end
 
     local function run_review()
-        AI.get_opencode_response(
+        if cancelled then
+            return
+        end
+
+        ai_cancel = AI.get_opencode_response(
             config.opencode_url,
             config.review_model,
             formatted_prompt,
             { agent = config.review_agent, retry_count = config.retry_count },
             function(result, err)
-                if err then
-                    vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
-                    return
-                end
-                on_done(result)
+                finish(result, err)
             end
         )
+
+        if cancelled and ai_cancel then
+            ai_cancel()
+        end
     end
 
     -- Make sure a server is reachable first; start one if it isn't, then review.
-    SERVER.ensure_ready(config.opencode_url, config.start_command, {
+    ready_cancel = SERVER.ensure_ready(config.opencode_url, config.start_command, {
         ready_timeout_ms = config.ready_timeout_ms,
         poll_interval_ms = config.poll_interval_ms,
     }, function(ok, err)
+        if cancelled then
+            return
+        end
         if not ok then
-            vim.notify(
-                "could not start opencode server: " .. (err or "unknown error"),
-                vim.log.levels.ERROR,
-                { title = "Exoskeleton" }
-            )
+            finish(nil, "could not start opencode server: " .. (err or "unknown error"))
             return
         end
         run_review()
     end)
+
+    return cancel
 end
 
 --- @param config table: plugin configuration (see `exo.M.setup`).
@@ -130,9 +162,20 @@ REVIEW.review = function(config, ns)
     local ext_mark_id =
         NAV.place_mark(bufnr, ns, line_num - 1, col_num, " Reviewing ", review_highlights["progress"])
 
-    review_code(config, code, file_path, line_num, end_line_num, function(result)
+    local cancel = review_code(config, code, file_path, line_num, end_line_num, function(result, err)
+        MARKS.unregister_pending(bufnr, ns, ext_mark_id)
+
+        if err then
+            vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
+            return
+        end
+
+        if result == nil then
+            return
+        end
+
         local quality_label = result.quality:sub(1, 1):upper() .. result.quality:sub(2)
-        NAV.update_mark(
+        local updated = NAV.update_mark(
             ext_mark_id,
             bufnr,
             ns,
@@ -141,8 +184,14 @@ REVIEW.review = function(config, ns)
             " Review Complete - " .. quality_label .. " ",
             review_highlights[result.quality]
         )
+        if not updated then
+            return
+        end
 
         local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, ext_mark_id, {})
+        if #new_mark < 2 then
+            return
+        end
         local new_mark_row = new_mark[1]
 
         local review_comments = {}
@@ -172,6 +221,7 @@ REVIEW.review = function(config, ns)
             { title = "Exoskeleton" }
         )
     end)
+    MARKS.register_pending(bufnr, ns, ext_mark_id, cancel)
 end
 
 return REVIEW

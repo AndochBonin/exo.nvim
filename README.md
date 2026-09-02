@@ -111,6 +111,7 @@ IDs must match `review_model` / `explain_model` in `setup` (default
 
 ## Delete extmark(s) (normal mode): &lt;leader&gt; ed
 - Deletes all extmarks on the cursor line
+- Deleting a review or explanation mark while it is in progress silently cancels the AI request and all of its result side effects. The OpenCode server remains available for other operations.
 
 ## maybe some more
-- explain, document, complete, etc
+- complete, etc

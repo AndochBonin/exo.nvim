@@ -16,16 +16,24 @@ NAV.place_mark = function(bufnr, namespace, row, column, text, highlight)
 end
 
 NAV.update_mark = function(mark_id, bufnr, namespace, row, column, text, highlight)
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return false
+    end
+
     local old_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, namespace, mark_id, { details = true })
+    if #old_mark < 2 then
+        return false
+    end
 
     if row == nil then row = old_mark[1] end
     if column == nil then column = old_mark[2] end
 
-    vim.api.nvim_buf_set_extmark(bufnr, namespace, row, column, {
+    local ok = pcall(vim.api.nvim_buf_set_extmark, bufnr, namespace, row, column, {
         id = mark_id,
         virt_text = { { text, highlight } },
         virt_text_pos = "eol",
     })
+    return ok
 end
 
 NAV.delete_mark = function(bufnr, namespace, id)

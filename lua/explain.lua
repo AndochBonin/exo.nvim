@@ -1,5 +1,6 @@
 local EXPLAIN = {}
 local AI = require("ai")
+local MARKS = require("marks")
 local NAV = require("nav")
 local SERVER = require("server")
 local STORE = require("store")
@@ -182,72 +183,112 @@ EXPLAIN.explain = function(config, ns)
 
         vim.notify("Explaining…", vim.log.levels.INFO, { title = "Exoskeleton" })
 
+        local cancelled = false
+        local finished = false
+        local ready_cancel = nil
+        local ai_cancel = nil
+
+        local function finish(response, err)
+            if cancelled or finished then
+                return
+            end
+            finished = true
+            MARKS.unregister_pending(bufnr, ns, ext_mark_id)
+
+            if err then
+                vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
+                return
+            end
+
+            if response == nil then
+                return
+            end
+
+            local path, write_err = STORE.write_explanation({
+                title = response.title,
+                body = response.explanation,
+                source = selection_info,
+                bufnr = bufnr,
+            })
+            if write_err then
+                vim.notify(write_err, vim.log.levels.ERROR, { title = "Exoskeleton" })
+                return
+            end
+
+            -- Append a single one-line index entry; selecting it opens the
+            -- saved explanation file.
+            local location = selection_info ~= nil and string.format("%s:%d-%d", file_path, start_row, end_row)
+                or "(no selection)"
+            vim.fn.setqflist({}, "a", {
+                title = "Exo",
+                items = {
+                    { filename = path, lnum = 1, text = response.title .. "  —  " .. location },
+                },
+            })
+
+            if ext_mark_id ~= nil then
+                NAV.update_mark(
+                    ext_mark_id,
+                    bufnr,
+                    ns,
+                    nil,
+                    nil,
+                    " Explanation Saved - :copen to open ",
+                    "ExoExplainComplete"
+                )
+            end
+
+            vim.notify("Explanation saved - run :copen to open", vim.log.levels.INFO, { title = "Exoskeleton" })
+        end
+
+        local function cancel()
+            if cancelled or finished then
+                return
+            end
+            cancelled = true
+            if ready_cancel then
+                ready_cancel()
+            end
+            if ai_cancel then
+                ai_cancel()
+            end
+        end
+
         local function run_explain()
-            AI.get_opencode_explanation(
+            if cancelled then
+                return
+            end
+
+            ai_cancel = AI.get_opencode_explanation(
                 config.opencode_url,
                 config.explain_model,
                 prompt,
                 { agent = config.explain_agent, retry_count = config.retry_count },
                 function(response, err)
-                    if err then
-                        vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
-                        return
-                    end
-
-                    local path, write_err = STORE.write_explanation({
-                        title = response.title,
-                        body = response.explanation,
-                        source = selection_info,
-                        bufnr = bufnr,
-                    })
-                    if write_err then
-                        vim.notify(write_err, vim.log.levels.ERROR, { title = "Exoskeleton" })
-                        return
-                    end
-
-                    -- Append a single one-line index entry; selecting it opens the
-                    -- saved explanation file.
-                    local location = selection_info ~= nil and string.format("%s:%d-%d", file_path, start_row, end_row)
-                        or "(no selection)"
-                    vim.fn.setqflist({}, "a", {
-                        title = "Exo",
-                        items = {
-                            { filename = path, lnum = 1, text = response.title .. "  —  " .. location },
-                        },
-                    })
-
-                    if ext_mark_id ~= nil then
-                        NAV.update_mark(
-                            ext_mark_id,
-                            bufnr,
-                            ns,
-                            nil,
-                            nil,
-                            " Explanation Saved - :copen to open ",
-                            "ExoExplainComplete"
-                        )
-                    end
-
-                    vim.notify("Explanation saved - run :copen to open", vim.log.levels.INFO, { title = "Exoskeleton" })
+                    finish(response, err)
                 end
             )
+
+            if cancelled and ai_cancel then
+                ai_cancel()
+            end
         end
 
         -- Make sure a server is reachable first; start one if it isn't, then explain.
-        SERVER.ensure_ready(config.opencode_url, config.start_command, {
+        ready_cancel = SERVER.ensure_ready(config.opencode_url, config.start_command, {
             ready_timeout_ms = config.ready_timeout_ms,
             poll_interval_ms = config.poll_interval_ms,
         }, function(ok, err)
+            if cancelled then
+                return
+            end
             if not ok then
-                vim.notify(
-                    "could not start opencode server: " .. (err or "unknown error"),
-                    vim.log.levels.ERROR,
-                    { title = "Exoskeleton" }
-                )
+                finish(nil, "could not start opencode server: " .. (err or "unknown error"))
                 return
             end
             run_explain()
         end)
+        MARKS.register_pending(bufnr, ns, ext_mark_id, cancel)
     end)
 end
 

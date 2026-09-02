@@ -491,6 +491,7 @@ end
 ---   `fun(response): result, err, err_detail`). Defaults keep the review
 ---   json_schema + parser for backward compatibility.
 --- @param on_done fun(response: any|nil, err: string|nil)
+--- @return fun() cancel|nil
 AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 	base_url = base_url or "http://localhost:4096"
 	opts = opts or {}
@@ -511,9 +512,25 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 	local timeout = opts.timeout or 120000
 	local directory = opts.directory or vim.fn.getcwd()
 	local headers = build_headers(opts)
+	local cancelled = false
+	local callback_sent = false
+	local session_id = nil
+	local create_job = nil
+	local message_job = nil
+	local cleanup_started = false
+
+	local function stop_job(job)
+		if job == nil or job.handle == nil then
+			return
+		end
+
+		pcall(function()
+			job.handle:kill(15) -- SIGTERM
+		end)
+	end
 
 	local function delete_session(session_id, then_done)
-		curl.delete(with_directory(base_url .. "/session/" .. session_id, directory), {
+		return curl.delete(with_directory(base_url .. "/session/" .. session_id, directory), {
 			headers = headers,
 			timeout = timeout,
 			callback = function()
@@ -529,9 +546,49 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		})
 	end
 
+	local function abort_session(session_id, then_done)
+		return curl.post(with_directory(base_url .. "/session/" .. session_id .. "/abort", directory), {
+			headers = headers,
+			timeout = timeout,
+			callback = function()
+				then_done()
+			end,
+			on_error = function()
+				-- Deleting the session is still useful if abort races with a
+				-- server-side completion or the session is already gone.
+				then_done()
+			end,
+		})
+	end
+
+	local function cleanup_session(id, abort, then_done)
+		if cleanup_started then
+			return
+		end
+		cleanup_started = true
+
+		local function delete()
+			delete_session(id, then_done)
+		end
+
+		if abort then
+			abort_session(id, delete)
+		else
+			delete()
+		end
+	end
+
 	local function finish(response, err, err_detail, session_id)
+		if cancelled or callback_sent then
+			return
+		end
+
 		local function call_done()
 			vim.schedule(function()
+				if cancelled or callback_sent then
+					return
+				end
+				callback_sent = true
 				if err then
 					local detail = err_detail or { summary = { err } }
 					log_full(detail)
@@ -543,17 +600,35 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		end
 
 		if session_id then
-			delete_session(session_id, call_done)
+			cleanup_session(session_id, false, call_done)
 		else
 			call_done()
 		end
 	end
 
-	curl.post(with_directory(base_url .. "/session", directory), {
+	local function cleanup_cancelled_session()
+		if session_id then
+			cleanup_session(session_id, true, function() end)
+		end
+	end
+
+	create_job = curl.post(with_directory(base_url .. "/session", directory), {
 		headers = headers,
 		body = vim.json.encode({ title = opts.title or "exo-review" }),
 		timeout = timeout,
 		callback = function(session_response)
+			create_job = nil
+			if cancelled then
+				if session_response.status == 200 then
+					local ok, session_data = pcall(vim.json.decode, session_response.body)
+					if ok and type(session_data) == "table" and type(session_data.id) == "string" then
+						session_id = session_data.id
+						cleanup_cancelled_session()
+					end
+				end
+				return
+			end
+
 			if session_response.status ~= 200 then
 				finish(
 					nil,
@@ -564,7 +639,7 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 			end
 
 			local ok, session_data = pcall(vim.json.decode, session_response.body)
-			if not ok or type(session_data.id) ~= "string" then
+			if not ok or type(session_data) ~= "table" or type(session_data.id) ~= "string" then
 				finish(nil, "error creating session", {
 					summary = {
 						"OpenCode request failed",
@@ -577,7 +652,11 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 				return
 			end
 
-			local session_id = session_data.id
+			session_id = session_data.id
+			if cancelled then
+				cleanup_cancelled_session()
+				return
+			end
 			local message_body = {
 				system = opts.system or AI.review_system_prompt,
 				parts = { { type = "text", text = prompt } },
@@ -603,11 +682,16 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 				message_body.agent = opts.agent
 			end
 
-			curl.post(with_directory(base_url .. "/session/" .. session_id .. "/message", directory), {
+			message_job = curl.post(with_directory(base_url .. "/session/" .. session_id .. "/message", directory), {
 				headers = headers,
 				body = vim.json.encode(message_body),
 				timeout = timeout,
 				callback = function(message_response)
+					message_job = nil
+					if cancelled then
+						return
+					end
+
 					if message_response.status ~= 200 then
 						finish(
 							nil,
@@ -622,14 +706,33 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 					finish(parsed, err, err_detail, session_id)
 				end,
 				on_error = function(err)
+					message_job = nil
+					if cancelled then
+						return
+					end
 					finish(nil, err.message or "request failed", build_curl_error("send message", err), session_id)
 				end,
 			})
 		end,
 		on_error = function(err)
+			create_job = nil
+			if cancelled then
+				return
+			end
 			finish(nil, err.message or "request failed", build_curl_error("create session", err))
 		end,
 	})
+
+	return function()
+		if cancelled or callback_sent then
+			return
+		end
+
+		cancelled = true
+		stop_job(create_job)
+		stop_job(message_job)
+		cleanup_cancelled_session()
+	end
 end
 
 --- Request a structured explanation ({ title, explanation }). Thin wrapper over
@@ -653,7 +756,7 @@ AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 		retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
 	}
 	opts.parse = parse_explain_response
-	AI.get_opencode_response(base_url, model, prompt, opts, on_done)
+	return AI.get_opencode_response(base_url, model, prompt, opts, on_done)
 end
 
 return AI

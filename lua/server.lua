@@ -9,6 +9,16 @@ local handle = nil
 local started_by_us = false
 local starting = false
 
+local function stop_job(job)
+    if job == nil or job.handle == nil then
+        return
+    end
+
+    pcall(function()
+        job.handle:kill(15) -- SIGTERM
+    end)
+end
+
 --- Check whether an opencode server is reachable at `base_url`.
 --- Any HTTP response (regardless of status code) means the server is up; only a
 --- transport failure (curl `on_error`) means it is down. This keeps readiness
@@ -16,7 +26,7 @@ local starting = false
 --- @param base_url string
 --- @param callback fun(up: boolean)
 SERVER.ping = function(base_url, callback)
-    curl.get(base_url .. "/session", {
+    return curl.get(base_url .. "/session", {
         timeout = 1000,
         callback = function()
             vim.schedule(function()
@@ -37,10 +47,15 @@ end
 --- @return boolean ok
 --- @return string|nil err
 SERVER.start = function(start_command)
+    if handle and started_by_us then
+        return true
+    end
+
     local ok, result = pcall(vim.system, start_command, { text = true }, function()
         -- Process exited; drop the handle so `stop()` becomes a no-op.
         handle = nil
         started_by_us = false
+        starting = false
     end)
 
     if not ok then
@@ -63,10 +78,34 @@ SERVER.ensure_ready = function(base_url, start_command, opts, callback)
     opts = opts or {}
     local ready_timeout_ms = opts.ready_timeout_ms or 10000
     local poll_interval_ms = opts.poll_interval_ms or 250
+    local cancelled = false
+    local completed = false
+    local current_ping = nil
 
-    SERVER.ping(base_url, function(up)
+    local function finish(ok, err)
+        if cancelled or completed then
+            return
+        end
+        completed = true
+        callback(ok, err)
+    end
+
+    local function ping(done)
+        current_ping = SERVER.ping(base_url, function(up)
+            current_ping = nil
+            if not cancelled then
+                done(up)
+            end
+        end)
+    end
+
+    ping(function(up)
+        if cancelled then
+            return
+        end
+
         if up then
-            callback(true)
+            finish(true)
             return
         end
 
@@ -75,7 +114,7 @@ SERVER.ensure_ready = function(base_url, start_command, opts, callback)
             local ok, err = SERVER.start(start_command)
             if not ok then
                 starting = false
-                callback(false, "failed to spawn opencode server: " .. (err or "unknown error"))
+                finish(false, "failed to spawn opencode server: " .. (err or "unknown error"))
                 return
             end
         end
@@ -83,13 +122,21 @@ SERVER.ensure_ready = function(base_url, start_command, opts, callback)
         local deadline = vim.uv.now() + ready_timeout_ms
 
         local function poll()
-            SERVER.ping(base_url, function(ready)
+            if cancelled then
+                return
+            end
+
+            ping(function(ready)
+                if cancelled then
+                    return
+                end
+
                 if ready then
                     starting = false
-                    callback(true)
+                    finish(true)
                 elseif vim.uv.now() >= deadline then
                     starting = false
-                    callback(false, "opencode server did not become ready in time")
+                    finish(false, "opencode server did not become ready in time")
                 else
                     vim.defer_fn(poll, poll_interval_ms)
                 end
@@ -98,6 +145,24 @@ SERVER.ensure_ready = function(base_url, start_command, opts, callback)
 
         vim.defer_fn(poll, poll_interval_ms)
     end)
+
+    return function()
+        if cancelled or completed then
+            return
+        end
+
+        cancelled = true
+        stop_job(current_ping)
+        current_ping = nil
+
+        -- The server is intentionally left running. It may be shared by other
+        -- Exo operations, and SERVER.stop remains reserved for VimLeavePre.
+        if starting and handle ~= nil then
+            -- Allow a later ensure_ready call to adopt this still-starting
+            -- server without spawning a duplicate process.
+            starting = false
+        end
+    end
 end
 
 --- Stop the server if (and only if) this plugin started it. Safe to call when

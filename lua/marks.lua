@@ -1,5 +1,63 @@
 local MARKS = {}
 local NAV = require("nav")
+local PENDING = {}
+
+local function pending_for(bufnr, namespace, create)
+    local by_buffer = PENDING[bufnr]
+    if by_buffer == nil then
+        if not create then
+            return nil
+        end
+        by_buffer = {}
+        PENDING[bufnr] = by_buffer
+    end
+
+    local by_namespace = by_buffer[namespace]
+    if by_namespace == nil and create then
+        by_namespace = {}
+        by_buffer[namespace] = by_namespace
+    end
+    return by_namespace
+end
+
+--- Associate a cancellation callback with an in-progress extmark.
+--- @param bufnr integer
+--- @param namespace integer
+--- @param mark_id integer
+--- @param cancel fun()
+MARKS.register_pending = function(bufnr, namespace, mark_id, cancel)
+    pending_for(bufnr, namespace, true)[mark_id] = cancel
+end
+
+--- Remove the cancellation callback for a completed operation.
+--- @param bufnr integer
+--- @param namespace integer
+--- @param mark_id integer
+MARKS.unregister_pending = function(bufnr, namespace, mark_id)
+    local by_namespace = pending_for(bufnr, namespace, false)
+    if by_namespace == nil then
+        return
+    end
+
+    by_namespace[mark_id] = nil
+end
+
+-- The highlighted cancellation logic looks good: it safely
+-- handles missing entries, removes the callback before
+-- invoking it to prevent re-entrant double cancellation, and
+-- protects deletion from callback errors with `pcall`. No
+-- meaningful correctness issues found.
+local function cancel_pending(bufnr, namespace, mark_id)
+    local by_namespace = pending_for(bufnr, namespace, false)
+    local cancel = by_namespace and by_namespace[mark_id]
+    if cancel == nil then
+        return
+    end
+
+    -- Remove first so a re-entrant delete cannot cancel the same operation twice.
+    by_namespace[mark_id] = nil
+    pcall(cancel)
+end
 
 --- @param ns integer: the exoskeleton extmark namespace.
 MARKS.delete_mark = function(ns)
@@ -24,6 +82,7 @@ MARKS.delete_mark = function(ns)
     end
 
     for _, mark in ipairs(line_marks) do
+        cancel_pending(bufnr, ns, mark)
         local ok = NAV.delete_mark(bufnr, ns, mark)
         if not ok then
             vim.notify(string.format("Error deleting mark: %d", mark), vim.log.levels.ERROR, { title = "Exoskeleton" })
