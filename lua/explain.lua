@@ -9,15 +9,13 @@ local UTIL = require("util")
 --- exoskeleton extmark namespace used on source buffers).
 local FLOAT_NS = vim.api.nvim_create_namespace("exo_explain_float")
 
---- Open a centered floating input window for an explain request. Shows the
---- selection details (when any) and a read-only disclaimer, then calls
---- `on_submit(question)` with the typed prompt when the user presses <Enter>.
+--- Open a centered explain prompt: one coherent box with two sections — a
+--- bordered non-modifiable header (" Explain " title on top, selection info)
+--- above the input window, joined by the input window's flat ─ top border.
+--- Calls `on_submit(question)` with the typed prompt on <Enter>.
 --- @param selection_info { file_path: string, start_row: integer, end_row: integer }|nil
 --- @param on_submit fun(question: string)
 local function open_explain_window(selection_info, on_submit)
-    -- Width first so the separator can span the full content area.
-    local width = math.min(80, math.floor(vim.o.columns * 0.6))
-
     local header = {}
     if selection_info then
         table.insert(header, "File:  " .. selection_info.file_path)
@@ -25,53 +23,102 @@ local function open_explain_window(selection_info, on_submit)
     else
         table.insert(header, "No selection — asking a general question.")
     end
-    table.insert(header, string.rep("─", width))
 
-    -- The input line sits right after the separator (0-indexed == #header).
-    local input_line = #header
-    local lines = vim.deepcopy(header)
-    table.insert(lines, "")
-
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].bufhidden = "wipe"
-
-    -- Tint every line teal except the input line (all header lines: the info
-    -- line(s) and the separator, indices 0 .. input_line - 1).
-    for lnum = 0, input_line - 1 do
-        vim.api.nvim_buf_set_extmark(buf, FLOAT_NS, lnum, 0, { line_hl_group = "ExoExplainText" })
+    -- Both windows share one width: the max of each window's natural width, so
+    -- their outer edges always align.
+    local natural_header = 0
+    for _, line in ipairs(header) do
+        natural_header = math.max(natural_header, vim.fn.strdisplaywidth(line))
     end
+    local natural_input = math.min(80, math.floor(vim.o.columns * 0.6))
+    local width = math.max(natural_header, natural_input)
 
-    local height = #lines
-    local row = math.floor((vim.o.lines - height) / 2)
-    local col = math.floor((vim.o.columns - width) / 2)
+    -- Read-only header block, tinted with the explain accent.
+    local header_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(header_buf, 0, -1, false, header)
+    vim.bo[header_buf].bufhidden = "wipe"
+    for lnum = 0, #header - 1 do
+        vim.api.nvim_buf_set_extmark(header_buf, FLOAT_NS, lnum, 0, { line_hl_group = "ExoExplainText" })
+    end
+    vim.bo[header_buf].modifiable = false
 
-    local win = vim.api.nvim_open_win(buf, true, {
+    -- Input buffer: everything typed here is the prompt.
+    local input_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(input_buf, 0, -1, false, { "" })
+    vim.bo[input_buf].bufhidden = "wipe"
+
+    -- Float row/col anchor the outer frame (borders included). Total unit:
+    -- top border + header rows + divider + input row + bottom border.
+    local total_height = #header + 4
+    local row = math.floor((vim.o.lines - total_height) / 2)
+    local col = math.floor((vim.o.columns - (width + 2)) / 2)
+
+    -- Header: full rounded border with the title on top. Its bottom border row
+    -- is the same screen row as the input window's top border (see below),
+    -- which overdraws it — the seam renders as a single flat ─ line. Cannot
+    -- take focus.
+    local header_win = vim.api.nvim_open_win(header_buf, false, {
         relative = "editor",
         width = width,
-        height = height,
-        row = row,
+        height = #header,
+        row = row + 1,
         col = col,
         border = "rounded",
         style = "minimal",
+        focusable = false,
+        zindex = 50,
         title = { { " Explain ", "ExoExplainTitle" } },
         title_pos = "center",
     })
 
+    -- Input: its top border is a flat ─ divider, drawn over the header's bottom
+    -- border (higher zindex wins the shared row). NOTE: nvim 0.12 applies
+    -- border arrays in clockwise ring order —
+    -- { topleft, top, topright, right, bottomright, bottom, bottomleft, left }.
+    local win = vim.api.nvim_open_win(input_buf, true, {
+        relative = "editor",
+        width = width,
+        height = 1,
+        row = row + #header + 2,
+        col = col,
+        border = { "─", "─", "─", "│", "╯", "─", "╰", "│" },
+        style = "minimal",
+        zindex = 51,
+    })
+
+    -- Closing the input window (by any path: keymaps, :q, <C-w>c, …) must take
+    -- the header window down with it and always land in normal mode — the
+    -- input opens in insert mode, and non-keymap close paths skip stopinsert.
     local closed = false
+    local win_closed_autocmd = nil
     local function close()
         if closed then
             return
         end
         closed = true
-        if vim.api.nvim_win_is_valid(win) then
-            vim.api.nvim_win_close(win, true)
+        if win_closed_autocmd then
+            pcall(vim.api.nvim_del_autocmd, win_closed_autocmd)
+        end
+        vim.cmd.stopinsert()
+        for _, w in ipairs({ header_win, win }) do
+            if vim.api.nvim_win_is_valid(w) then
+                vim.api.nvim_win_close(w, true)
+            end
         end
     end
+    win_closed_autocmd = vim.api.nvim_create_autocmd("WinClosed", {
+        pattern = tostring(win),
+        callback = function()
+            -- The closed window is still mid-teardown inside this event; doing
+            -- our own window teardown synchronously here silently no-ops, so
+            -- run it on the next event-loop tick instead.
+            vim.schedule(close)
+        end,
+    })
 
     local function submit()
-        -- Everything from the input line to the end of the buffer is the prompt.
-        local input_lines = vim.api.nvim_buf_get_lines(buf, input_line, -1, false)
+        -- Everything in the input buffer is the prompt.
+        local input_lines = vim.api.nvim_buf_get_lines(input_buf, 0, -1, false)
         local question = vim.trim(table.concat(input_lines, "\n"))
         close()
         if question == "" then
@@ -81,14 +128,12 @@ local function open_explain_window(selection_info, on_submit)
         on_submit(question)
     end
 
-    vim.api.nvim_win_set_cursor(win, { input_line + 1, 0 })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
     vim.cmd("startinsert")
 
-    local map_opts = { buffer = buf, nowait = true, silent = true }
-    vim.keymap.set({ "i", "n" }, "<CR>", function()
-        vim.cmd("stopinsert")
-        submit()
-    end, map_opts)
+    local map_opts = { buffer = input_buf, nowait = true, silent = true }
+    vim.keymap.set({ "i", "n" }, "<CR>", submit, map_opts)
+    vim.keymap.set("i", "<Esc>", vim.cmd.stopinsert, map_opts)
     vim.keymap.set("n", "<Esc>", close, map_opts)
     vim.keymap.set("n", "q", close, map_opts)
 end
