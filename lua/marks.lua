@@ -1,6 +1,7 @@
 local MARKS = {}
 local NAV = require("nav")
 local PENDING = {}
+local RESPONSES = {}
 
 local function pending_for(bufnr, namespace, create)
     local by_buffer = PENDING[bufnr]
@@ -10,6 +11,24 @@ local function pending_for(bufnr, namespace, create)
         end
         by_buffer = {}
         PENDING[bufnr] = by_buffer
+    end
+
+    local by_namespace = by_buffer[namespace]
+    if by_namespace == nil and create then
+        by_namespace = {}
+        by_buffer[namespace] = by_namespace
+    end
+    return by_namespace
+end
+
+local function response_for(bufnr, namespace, create)
+    local by_buffer = RESPONSES[bufnr]
+    if by_buffer == nil then
+        if not create then
+            return nil
+        end
+        by_buffer = {}
+        RESPONSES[bufnr] = by_buffer
     end
 
     local by_namespace = by_buffer[namespace]
@@ -40,6 +59,52 @@ MARKS.unregister_pending = function(bufnr, namespace, mark_id)
     end
 
     by_namespace[mark_id] = nil
+end
+
+--- Store the completed response associated with an extmark.
+--- @param bufnr integer
+--- @param namespace integer
+--- @param mark_id integer
+--- @param response table
+MARKS.register_response = function(bufnr, namespace, mark_id, response)
+    response_for(bufnr, namespace, true)[mark_id] = response
+end
+
+--- Remove a completed response associated with an extmark.
+--- @param bufnr integer
+--- @param namespace integer
+--- @param mark_id integer
+MARKS.unregister_response = function(bufnr, namespace, mark_id)
+    local by_namespace = response_for(bufnr, namespace, false)
+    if by_namespace == nil then
+        return
+    end
+
+    by_namespace[mark_id] = nil
+end
+
+--- @param bufnr integer
+--- @param namespace integer
+--- @param row integer: zero-indexed buffer row
+--- @return table[]: entries with id, row, column, and response fields
+MARKS.responses_on_line = function(bufnr, namespace, row)
+    local by_namespace = response_for(bufnr, namespace, false)
+    if by_namespace == nil then
+        return {}
+    end
+
+    local responses = {}
+    for _, mark in ipairs(NAV.list_marks(bufnr, namespace)) do
+        if mark[2] == row and by_namespace[mark[1]] ~= nil then
+            table.insert(responses, {
+                id = mark[1],
+                row = mark[2],
+                column = mark[3],
+                response = by_namespace[mark[1]],
+            })
+        end
+    end
+    return responses
 end
 
 -- The highlighted cancellation logic looks good: it safely
@@ -83,6 +148,7 @@ MARKS.delete_mark = function(ns)
 
     for _, mark in ipairs(line_marks) do
         cancel_pending(bufnr, ns, mark)
+        MARKS.unregister_response(bufnr, ns, mark)
         local ok = NAV.delete_mark(bufnr, ns, mark)
         if not ok then
             vim.notify(string.format("Error deleting mark: %d", mark), vim.log.levels.ERROR, { title = "Exoskeleton" })

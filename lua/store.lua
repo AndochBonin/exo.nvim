@@ -1,6 +1,9 @@
 local STORE = {}
 
-local EXPLANATIONS_DIR = "exo-explanations"
+local RESPONSE_DIRS = {
+    explain = "exo-explanations",
+    review = "exo-reviews",
+}
 
 --- Resolve the git repository root for a buffer, or nil when not in a repo.
 --- @param bufnr integer|nil
@@ -26,12 +29,13 @@ STORE.slugify = function(title)
     return slug
 end
 
---- Append `exo-explanations/` to `<root>/.git/info/exclude`, unless it is
+--- Append a generated response directory to `<root>/.git/info/exclude`, unless it is
 --- already present. Silently no-ops if the exclude file cannot be read/written.
 --- @param root string
-local function add_to_git_exclude(root)
+--- @param directory string
+local function add_to_git_exclude(root, directory)
     local exclude_path = root .. "/.git/info/exclude"
-    local line = EXPLANATIONS_DIR .. "/"
+    local line = directory .. "/"
 
     local existing = {}
     if vim.fn.filereadable(exclude_path) == 1 then
@@ -47,20 +51,24 @@ local function add_to_git_exclude(root)
     pcall(vim.fn.writefile, existing, exclude_path)
 end
 
---- Persist an explanation to `<root>/exo-explanations/<slug>-<timestamp>.md`.
---- The folder lives at the git repo root (falling back to cwd when the buffer
---- is not in a repo); on first creation inside a git repo the folder is added
---- to `.git/info/exclude` exactly once.
---- @param opts { title: string, body: string, source: { file_path: string, start_row: integer, end_row: integer }|nil, bufnr: integer|nil }
+--- Persist a response to a generated response directory. The folder lives at
+--- the git repo root (falling back to cwd when the buffer is not in a repo);
+--- on first creation inside a git repo the folder is added to `.git/info/exclude`.
+--- @param opts { kind: "review"|"explain", title: string, body: string, source: { file_path: string, start_row: integer, end_row: integer }|nil, bufnr: integer|nil }
 --- @return string|nil path, string|nil err
-STORE.write_explanation = function(opts)
+STORE.write_response = function(opts)
     local root = STORE.git_root(opts.bufnr)
     local is_git = root ~= nil
     if not is_git then
         root = vim.fn.getcwd()
     end
 
-    local dir = root .. "/" .. EXPLANATIONS_DIR
+    local response_dir = RESPONSE_DIRS[opts.kind]
+    if response_dir == nil then
+        return nil, "unknown response kind: " .. tostring(opts.kind)
+    end
+
+    local dir = root .. "/" .. response_dir
     local existed = vim.fn.isdirectory(dir) == 1
 
     if vim.fn.mkdir(dir, "p") == 0 and not existed then
@@ -69,7 +77,7 @@ STORE.write_explanation = function(opts)
 
     -- Exclude the folder once, when it is first created inside a git repo.
     if is_git and not existed then
-        add_to_git_exclude(root)
+        add_to_git_exclude(root, response_dir)
     end
 
     local filename = STORE.slugify(opts.title) .. "-" .. os.date("%Y%m%d-%H%M%S") .. ".md"

@@ -4,34 +4,6 @@ local MARKS = require("marks")
 local NAV = require("nav")
 local SERVER = require("server")
 local UTIL = require("util")
-local MAX_NUM_CHARS = 60
-
---- Greedy word-wrap: split text into fragments of at most max_chars, never
---- breaking a word. A single word longer than max_chars becomes its own fragment.
---- @param text string
---- @param max_chars integer
---- @return string[]
-local function split_into_fragments(text, max_chars)
-    local fragments = {}
-    local current = ""
-
-    for word in text:gmatch("%S+") do
-        if current == "" then
-            current = word
-        elseif #current + 1 + #word <= max_chars then
-            current = current .. " " .. word
-        else
-            table.insert(fragments, current)
-            current = word
-        end
-    end
-
-    if current ~= "" then
-        table.insert(fragments, current)
-    end
-
-    return fragments
-end
 
 --- @param config table: plugin configuration (see `exo.M.setup`).
 --- @param code string[]: A list of lines to be reviewed.
@@ -141,6 +113,7 @@ REVIEW.review = function(config, ns)
     if file_path == nil or file_path == "" then
         file_path = "[unnamed buffer]"
     end
+    local comment_string = vim.bo.commentstring
 
     vim.notify("Reviewing selection…", vim.log.levels.INFO, { title = "Exoskeleton" })
 
@@ -149,6 +122,7 @@ REVIEW.review = function(config, ns)
         okay = "ExoReviewOkay",
         poor = "ExoReviewPoor",
         progress = "ExoReviewInProgress",
+        failed = "ExoRequestFailed",
     }
 
     local line = vim.fn.getline(line_num)
@@ -166,6 +140,15 @@ REVIEW.review = function(config, ns)
         MARKS.unregister_pending(bufnr, ns, ext_mark_id)
 
         if err then
+            NAV.update_mark(
+                ext_mark_id,
+                bufnr,
+                ns,
+                nil,
+                nil,
+                " Request failed ",
+                review_highlights.failed
+            )
             vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
             return
         end
@@ -188,35 +171,33 @@ REVIEW.review = function(config, ns)
             return
         end
 
-        local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, ext_mark_id, {})
-        if #new_mark < 2 then
+        local mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, ext_mark_id, {})
+        if #mark < 2 then
             return
         end
-        local new_mark_row = new_mark[1]
 
-        local review_comments = {}
-        local comment_string = vim.bo.commentstring
-
-        if comment_string == nil then
-            comment_string = "// %s"
-        end
-
-        for _, fragment in ipairs(split_into_fragments(result.comment, MAX_NUM_CHARS)) do
-            table.insert(review_comments, string.format(comment_string, fragment))
-        end
-
-        vim.api.nvim_buf_set_lines(0, new_mark_row, new_mark_row, false, review_comments)
+        MARKS.register_response(bufnr, ns, ext_mark_id, {
+            kind = "review",
+            namespace = ns,
+            response = result,
+            title = "Code Review - " .. quality_label,
+            body = result.comment,
+            source = { file_path = file_path, start_row = line_num, end_row = end_line_num },
+            bufnr = bufnr,
+            commentstring = comment_string,
+            allow_inline = true,
+        })
 
         -- Append the review location to the shared "Exo" quickfix list.
         vim.fn.setqflist({}, "a", {
             title = "Exo",
             items = {
-                { bufnr = bufnr, lnum = line_num, text = "Code Review - " .. quality_label },
+                { bufnr = bufnr, lnum = mark[1] + 1, text = "Code Review - " .. quality_label },
             },
         })
 
         vim.notify(
-            "Review Complete - run :copen to view",
+            "Review Complete - press Enter to view",
             vim.log.levels.INFO,
             { title = "Exoskeleton" }
         )

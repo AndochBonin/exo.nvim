@@ -17,8 +17,8 @@ require("exo").setup({
   opencode_url = "http://localhost:4096",
   -- Keep start_command in sync with opencode_url's port.
   start_command = { "opencode", "serve", "--port", "4096" },
-  review_model = "opencode-go/gpt-5.6-luna",
-  explain_model = "opencode-go/gpt-5.6-luna",
+  review_model = "opencode-go/deepseek-v4-flash",
+  explain_model = "opencode-go/deepseek-v4-flash",
   review_agent = "exo-review",
   explain_agent = "exo-explain",
   ready_timeout_ms = 10000, -- how long to wait for the server to come up
@@ -38,15 +38,17 @@ require("exo").setup({
 Exo's labels follow your colorscheme instead of hardcoding colors:
 
 - **Badges** (`ExoReviewGood`/`Okay`/`Poor`, `ExoReviewInProgress`,
-  `ExoExplainInProgress`, `ExoExplainComplete`) — white text on the fg color of a
-  theme group (`DiagnosticOk`/`Warn`/`Error`/`Info`/`Hint` by default). If the
-  theme doesn't define the source group, the previous fixed color is used.
+  `ExoExplainInProgress`, `ExoExplainComplete`, `ExoRequestFailed`) — white text
+  on the fg color of a theme group (`DiagnosticOk`/`Warn`/`Error`/`Info`/`Hint`
+  by default). If the theme doesn't define the source group, the previous fixed
+  color is used.
 - **Explain float** (`ExoExplainTitle`, `ExoExplainText`) — link to
   `FloatTitle` and `Comment`.
 
 Every source is overridable via `setup({ highlights = { ... } })` with the keys
 `review_good`, `review_okay`, `review_poor`, `review_in_progress`,
-`explain_in_progress`, `explain_complete`, `explain_title`, `explain_text`.
+`explain_in_progress`, `explain_complete`, `request_failed`, `explain_title`,
+`explain_text`.
 Colors re-derive automatically when you switch `:colorscheme`.
 
 ### Required OpenCode config
@@ -85,23 +87,33 @@ guaranteeing neither a review nor an explanation can modify your files. Review
 focuses on your highlighted selection but may read the rest of the project for
 context; explain may read the project and search the web. The `provider/model`
 IDs must match `review_model` / `explain_model` in `setup` (default
-`opencode-go/gpt-5.6-luna` for both), and the provider must be authenticated
+`opencode-go/deepseek-v4-flash` for both), and the provider must be authenticated
 (e.g. your opencode go key connected via `opencode auth login`).
 
 ## Review (visual mode): &lt;leader&gt; er
-- Review the visually selected code section. Leaves an extmark labelled "review in progress" at the review site for easy navigation (see below).
-- After review comments are left at the review site, extmark label changes to "good" / "okay" / "poor" denoting the quality of the reviewed code.
+- Review the visually selected code section. Leaves an extmark labelled "review in progress" at the review site for easy navigation.
+- When the response is ready, the extmark label changes to "good" / "okay" / "poor" and the response is available by pressing `<CR>` on its line.
+- Review text is not inserted automatically. From the response float, press `i` to insert it as inline comments or `f` to save it under `exo-reviews/`.
+- If review generation fails, its mark is retained as `Request failed` and the error is reported normally.
 
 ## Explain: &lt;leader&gt; ee
 - Opens a centered floating window with a text input field. When you trigger it
   from a visual selection, the window shows the selection details (file name,
   start/end rows); Explain also works from normal mode with no selection (a general question).
-- Type your question and press Enter. The window closes and, if you had a
-  selection, an extmark labelled "Explaining" is left at the selection site.
+- Type your question and press Enter. The window closes and an extmark labelled
+  "Explaining" is left at the selection site or the original cursor line.
 - The agent explains your question in the context of the project (and may search
   the web). When it finishes, the explanation is loaded into the quickfix list
   (open it with `:copen`), a notification fires, and the extmark changes to
-  "Explanation Complete: :copen to read".
+  "Explanation Complete".
+- The response is available by pressing `<CR>` on the extmark's line. From the response float, press `f` to save it under `exo-explanations/`; explanations without a selection cannot be inserted as inline comments.
+- If explanation generation fails, its mark is retained as `Request failed` and the error is reported normally.
+
+## Response float
+- Press `<CR>` on a completed Exo extmark to open its read-only response float. If multiple responses share the line, choose one from the selection menu.
+- Press `i` to save the response as inline comments, `f` to save it as a Markdown file, or `q` / `<Esc>` to close the float.
+- Inline comments are inserted above the extmark and use the buffer's `commentstring`. The response body is used as-is, one commented line per response line.
+- Saving closes the float but keeps the extmark and response available.
 
 ## Previous extmark (normal mode): &lt;leader&gt; ep
 - Jumps to the closest extmark above the cursor

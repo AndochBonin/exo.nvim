@@ -1,13 +1,14 @@
 local M = {}
 local NS = nil
 local SERVER = require("server")
+local RESPONSE = require("response")
 
 -- User-overridable configuration (see `M.setup`). Note: `opencode_url` and
 -- `start_command` are independent — if you change the URL/port, update
 -- `start_command` to match so the auto-started server binds where we connect.
 local config = {
-    review_model = "opencode-go/gpt-5.6-luna",
-    explain_model = "opencode-go/gpt-5.6-luna",
+    review_model = "opencode-go/deepseek-v4-flash",
+    explain_model = "opencode-go/deepseek-v4-flash",
     opencode_url = "http://localhost:4096",
     review_agent = "exo-review",
     explain_agent = "exo-explain",
@@ -27,6 +28,7 @@ local config = {
         review_in_progress = "DiagnosticInfo",
         explain_in_progress = "DiagnosticInfo",
         explain_complete = "DiagnosticHint",
+        request_failed = "DiagnosticError",
         explain_title = "FloatTitle",
         explain_text = "Comment",
     },
@@ -43,6 +45,7 @@ local HIGHLIGHTS = {
     review_in_progress = { group = "ExoReviewInProgress", source = "DiagnosticInfo", fallback = "#4052d6" },
     explain_in_progress = { group = "ExoExplainInProgress", source = "DiagnosticInfo", fallback = "#4052d6" },
     explain_complete = { group = "ExoExplainComplete", source = "DiagnosticHint", fallback = "#1f8f8f" },
+    request_failed = { group = "ExoRequestFailed", source = "DiagnosticError", fallback = "#b5453c" },
     explain_title = { group = "ExoExplainTitle", source = "FloatTitle", link = true },
     explain_text = { group = "ExoExplainText", source = "Comment", link = true },
 }
@@ -51,12 +54,6 @@ local HIGHLIGHTS = {
 --- did not override are registered with `default = true`, so an Exo* group
 --- defined elsewhere (colorscheme, :highlight) wins over our default.
 --- @param overridden table|nil: the raw `opts.highlights`, or nil
--- The highlighted code looks correct. It derives badge
--- backgrounds from the configured source highlight, preserves
--- existing Exo groups through `default = true` unless
--- explicitly overridden, and applies linked float groups as
--- intended. No meaningful correctness, security, or
--- performance issues are apparent in this range.
 local apply_highlights = function(overridden)
     overridden = overridden or {}
     for key, spec in pairs(HIGHLIGHTS) do
@@ -107,6 +104,11 @@ M.setup = function(opts)
     vim.keymap.set("n", "<leader>ed", "<CMD>ExoDeleteMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>ep", "<CMD>ExoPrevMark<CR>", { silent = true })
     vim.keymap.set("n", "<leader>en", "<CMD>ExoNextMark<CR>", { silent = true })
+    vim.keymap.set("n", "<CR>", function()
+        if not RESPONSE.open(NS) then
+            vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "n", false)
+        end
+    end, { silent = true })
 
     -- Stop the opencode server on exit, but only if we started it ourselves.
     vim.api.nvim_create_autocmd("VimLeavePre", {
@@ -125,6 +127,10 @@ end
 
 M.explain = function()
     require("explain").explain(config, NS)
+end
+
+M.open_response = function()
+    return RESPONSE.open(NS)
 end
 
 M.delete_mark = function()

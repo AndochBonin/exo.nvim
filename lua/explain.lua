@@ -3,7 +3,6 @@ local AI = require("ai")
 local MARKS = require("marks")
 local NAV = require("nav")
 local SERVER = require("server")
-local STORE = require("store")
 local UTIL = require("util")
 
 --- Namespace for highlights inside the explain input float (kept separate from the
@@ -86,12 +85,41 @@ local function open_explain_window(selection_info, on_submit)
         style = "minimal",
         zindex = 51,
     })
+    vim.wo[win].wrap = true
+    vim.wo[win].linebreak = false
 
     -- Closing the input window (by any path: keymaps, :q, <C-w>c, …) must take
     -- the header window down with it and always land in normal mode — the
     -- input opens in insert mode, and non-keymap close paths skip stopinsert.
     local closed = false
     local win_closed_autocmd = nil
+    local resize_autocmds = {}
+
+    local function required_height()
+        local content_width = vim.api.nvim_win_get_width(win)
+        local height = 0
+        for _, line in ipairs(vim.api.nvim_buf_get_lines(input_buf, 0, -1, false)) do
+            local display_width = vim.fn.strdisplaywidth(line)
+            height = height + math.max(1, math.ceil(display_width / content_width))
+        end
+        return math.max(1, height)
+    end
+
+    local function resize_input()
+        if closed or not vim.api.nvim_win_is_valid(win) then
+            return
+        end
+
+        -- Keep the input's top edge fixed and cap its content rows so the
+        -- bottom border remains inside the editor. Once capped, normal float
+        -- scrolling reveals additional wrapped input rows.
+        local max_height = math.max(1, vim.o.lines - (row + #header + 2) - 2)
+        local height = math.min(required_height(), max_height)
+        if vim.api.nvim_win_get_height(win) ~= height then
+            vim.api.nvim_win_set_height(win, height)
+        end
+    end
+
     local function close()
         if closed then
             return
@@ -99,6 +127,9 @@ local function open_explain_window(selection_info, on_submit)
         closed = true
         if win_closed_autocmd then
             pcall(vim.api.nvim_del_autocmd, win_closed_autocmd)
+        end
+        for _, autocmd in ipairs(resize_autocmds) do
+            pcall(vim.api.nvim_del_autocmd, autocmd)
         end
         vim.cmd.stopinsert()
         for _, w in ipairs({ header_win, win }) do
@@ -116,6 +147,15 @@ local function open_explain_window(selection_info, on_submit)
             vim.schedule(close)
         end,
     })
+    for _, event in ipairs({ "TextChangedI", "TextChangedP", "TextChanged" }) do
+        table.insert(resize_autocmds, vim.api.nvim_create_autocmd(event, {
+            buffer = input_buf,
+            callback = resize_input,
+        }))
+    end
+    table.insert(resize_autocmds, vim.api.nvim_create_autocmd("VimResized", {
+        callback = resize_input,
+    }))
 
     local function submit()
         -- Everything in the input buffer is the prompt.
@@ -130,6 +170,7 @@ local function open_explain_window(selection_info, on_submit)
     end
 
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    resize_input()
     vim.cmd("startinsert")
 
     local map_opts = { buffer = input_buf, nowait = true, silent = true }
@@ -154,6 +195,7 @@ EXPLAIN.explain = function(config, ns)
         file_path = "[unnamed buffer]"
     end
     local file_type = vim.bo.filetype
+    local comment_string = vim.bo.commentstring
 
     -- Selection is optional: explain can answer a general question with none.
     local selection_info = nil
@@ -196,6 +238,15 @@ EXPLAIN.explain = function(config, ns)
             MARKS.unregister_pending(bufnr, ns, ext_mark_id)
 
             if err then
+                NAV.update_mark(
+                    ext_mark_id,
+                    bufnr,
+                    ns,
+                    nil,
+                    nil,
+                    " Request failed ",
+                    "ExoRequestFailed"
+                )
                 vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })
                 return
             end
@@ -204,41 +255,44 @@ EXPLAIN.explain = function(config, ns)
                 return
             end
 
-            local path, write_err = STORE.write_explanation({
+            local updated = NAV.update_mark(
+                ext_mark_id,
+                bufnr,
+                ns,
+                nil,
+                nil,
+                " Explanation Complete - press Enter to view ",
+                "ExoExplainComplete"
+            )
+            if not updated then
+                return
+            end
+
+            local mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, ext_mark_id, {})
+            if #mark < 2 then
+                return
+            end
+
+            MARKS.register_response(bufnr, ns, ext_mark_id, {
+                kind = "explain",
+                namespace = ns,
+                response = response,
                 title = response.title,
                 body = response.explanation,
                 source = selection_info,
                 bufnr = bufnr,
+                commentstring = comment_string,
+                allow_inline = selection_info ~= nil,
             })
-            if write_err then
-                vim.notify(write_err, vim.log.levels.ERROR, { title = "Exoskeleton" })
-                return
-            end
 
-            -- Append a single one-line index entry; selecting it opens the
-            -- saved explanation file.
-            local location = selection_info ~= nil and string.format("%s:%d-%d", file_path, start_row, end_row)
-                or "(no selection)"
             vim.fn.setqflist({}, "a", {
                 title = "Exo",
                 items = {
-                    { filename = path, lnum = 1, text = response.title .. "  —  " .. location },
+                    { bufnr = bufnr, lnum = mark[1] + 1, text = "Code Explanation - " .. response.title },
                 },
             })
 
-            if ext_mark_id ~= nil then
-                NAV.update_mark(
-                    ext_mark_id,
-                    bufnr,
-                    ns,
-                    nil,
-                    nil,
-                    " Explanation Saved - :copen to open ",
-                    "ExoExplainComplete"
-                )
-            end
-
-            vim.notify("Explanation saved - run :copen to open", vim.log.levels.INFO, { title = "Exoskeleton" })
+            vim.notify("Explanation Complete - press Enter to view", vim.log.levels.INFO, { title = "Exoskeleton" })
         end
 
         local function cancel()
