@@ -261,7 +261,7 @@ EXPLAIN.explain = function(config, ns)
                 ns,
                 nil,
                 nil,
-                " Explanation Complete - press Enter to view ",
+                " Explanation Complete ",
                 "ExoExplainComplete"
             )
             if not updated then
