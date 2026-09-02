@@ -132,6 +132,11 @@ end
 
 local curl = require("plenary.curl")
 
+-- How many times OpenCode re-asks the model when its structured output fails
+-- schema validation (the "structural" errors). Overridable per-call via
+-- `opts.retry_count`, and plugin-wide via `config.retry_count`.
+AI.DEFAULT_FORMAT_RETRY_COUNT = 4
+
 local VALID_QUALITIES = { good = true, okay = true, poor = true }
 
 local function build_headers(opts)
@@ -523,9 +528,11 @@ end
 --- @param model string|{ providerID: string, modelID: string }|nil
 --- @param prompt string
 --- @param opts table|nil: may set `agent`, `system`, `title`, `directory`,
----   `timeout`, plus `format` (json_schema table, or `false` to omit and get free
----   text) and `parse` (a `fun(response): result, err, err_detail`). Defaults keep
----   the review json_schema + parser for backward compatibility.
+---   `timeout`, `retry_count` (structured-output schema retries; defaults to
+---   `AI.DEFAULT_FORMAT_RETRY_COUNT`), plus `format` (json_schema table, or
+---   `false` to omit and get free text) and `parse` (a
+---   `fun(response): result, err, err_detail`). Defaults keep the review
+---   json_schema + parser for backward compatibility.
 --- @param on_done fun(response: any|nil, err: string|nil)
 AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 	base_url = base_url or "http://localhost:4096"
@@ -627,7 +634,7 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 				message_body.format = {
 					type = "json_schema",
 					schema = AI.review_response_schema,
-					retryCount = 2,
+					retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
 				}
 			end
 
@@ -675,7 +682,8 @@ end
 --- @param base_url string|nil
 --- @param model string|{ providerID: string, modelID: string }|nil
 --- @param prompt string
---- @param opts table|nil: may set `agent`, `system`, `directory`, `timeout`.
+--- @param opts table|nil: may set `agent`, `system`, `directory`, `timeout`,
+---   `retry_count` (structured-output schema retries).
 --- @param on_done fun(response: ExoExplainResponse|nil, err: string|nil)
 AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 	opts = vim.tbl_extend("force", {
@@ -685,7 +693,7 @@ AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 	opts.format = {
 		type = "json_schema",
 		schema = AI.explain_response_schema,
-		retryCount = 2,
+		retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
 	}
 	opts.parse = parse_explain_response
 	AI.get_opencode_response(base_url, model, prompt, opts, on_done)

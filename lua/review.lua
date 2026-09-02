@@ -48,7 +48,7 @@ local review_code = function(config, code, file_path, start_line, end_line, on_d
             config.opencode_url,
             config.ai_model,
             formatted_prompt,
-            { agent = config.review_agent },
+            { agent = config.review_agent, retry_count = config.retry_count },
             function(result, err)
                 if err then
                     vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })

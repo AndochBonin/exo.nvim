@@ -142,7 +142,7 @@ EXPLAIN.explain = function(config, ns)
                 config.opencode_url,
                 config.ai_model,
                 prompt,
-                { agent = config.explain_agent },
+                { agent = config.explain_agent, retry_count = config.retry_count },
                 function(response, err)
                     if err then
                         vim.notify(err, vim.log.levels.ERROR, { title = "Exoskeleton" })

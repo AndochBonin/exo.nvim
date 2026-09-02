@@ -13,6 +13,10 @@ local config = {
     start_command = { "opencode", "serve", "--port", "4096" },
     ready_timeout_ms = 10000,
     poll_interval_ms = 250,
+    -- How many times OpenCode re-asks the model when its structured output fails
+    -- schema validation. Raise this if you see frequent "structured output" /
+    -- schema errors from reviews or explanations.
+    retry_count = 4,
 }
 
 --- @param opts table|nil overrides merged over the defaults in `config`
