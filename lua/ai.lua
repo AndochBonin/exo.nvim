@@ -71,6 +71,27 @@ You are in read-only mode: never modify, create, or delete any files. Only
 explain.
 ]]
 
+-- Fallback prompt used when structured output is refused (e.g. the model's
+-- thinking mode rejects a forced tool_choice). Same guidance, but asks for a
+-- plain-text shape we can parse ourselves instead of a json_schema.
+AI.explain_freetext_system_prompt = [[
+You are a senior software engineer. Explain the user's question clearly and
+concisely.
+
+When a code selection and project are provided, explain the selection in the
+context of that project: you may read other files in the project (imports,
+callees, types) to ground your explanation. You may also search the web for
+up-to-date information when it helps.
+
+Format your reply as plain text:
+- The FIRST line is a short title (3-8 words), with no prefix and no Markdown.
+- Then a blank line.
+- Then the full explanation, formatted as Markdown.
+
+You are in read-only mode: never modify, create, or delete any files. Only
+explain.
+]]
+
 --- @class ExoExplainResponse
 --- @field title string
 --- @field explanation string
@@ -401,6 +422,47 @@ local function parse_review_response(response)
 	}, nil, nil
 end
 
+-- Surface any nested backend error (e.g. an APIError from the model backend)
+-- as (message, err_detail); returns nil when there is no nested error.
+local function explain_backend_error(data, response)
+	if not (data.info and data.info.error) then
+		return nil
+	end
+	local error = data.info.error
+	local message = error.message or "explain error"
+	local label = error.name and (error.name .. ": " .. message) or message
+	local summary = {
+		"OpenCode request failed",
+		"",
+		"Step: parse explain response",
+		"Error: " .. label,
+	}
+	if error.retries ~= nil then
+		table.insert(summary, "Retries: " .. tostring(error.retries))
+	end
+	return message, {
+		summary = summary,
+		body = pretty_body(response.body),
+	}
+end
+
+-- Concatenate the assistant's text parts from a free-text (non-structured) reply.
+local function assistant_text_from_parts(parts)
+	if type(parts) ~= "table" then
+		return nil
+	end
+	local chunks = {}
+	for _, part in ipairs(parts) do
+		if part.type == "text" and type(part.text) == "string" then
+			table.insert(chunks, part.text)
+		end
+	end
+	if #chunks == 0 then
+		return nil
+	end
+	return table.concat(chunks)
+end
+
 --- Parse a structured explain response ({ title, explanation }).
 --- @param response table
 --- @return ExoExplainResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
@@ -418,24 +480,9 @@ local function parse_explain_response(response)
 		}
 	end
 
-	-- Surface any nested backend error (e.g. an APIError from the model backend).
-	if data.info and data.info.error then
-		local error = data.info.error
-		local message = error.message or "explain error"
-		local label = error.name and (error.name .. ": " .. message) or message
-		local summary = {
-			"OpenCode request failed",
-			"",
-			"Step: parse explain response",
-			"Error: " .. label,
-		}
-		if error.retries ~= nil then
-			table.insert(summary, "Retries: " .. tostring(error.retries))
-		end
-		return nil, message, {
-			summary = summary,
-			body = pretty_body(response.body),
-		}
+	local backend_message, backend_detail = explain_backend_error(data, response)
+	if backend_message then
+		return nil, backend_message, backend_detail
 	end
 
 	local structured = extract_structured(data)
@@ -478,6 +525,67 @@ local function parse_explain_response(response)
 	return {
 		title = structured.title,
 		explanation = structured.explanation,
+	}, nil, nil
+end
+
+--- Parse a free-text explain reply (fallback when structured output is refused,
+--- e.g. the model's thinking mode rejects a forced tool_choice). Expects the
+--- title on the first non-empty line and the explanation in the remaining text.
+--- @param response table
+--- @return ExoExplainResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
+local function parse_explain_freetext(response)
+	local data, decode_err = decode_response_body(response.body)
+	if data == nil then
+		return nil, decode_err, {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: " .. decode_err,
+			},
+			body = pretty_body(response.body),
+		}
+	end
+
+	local backend_message, backend_detail = explain_backend_error(data, response)
+	if backend_message then
+		return nil, backend_message, backend_detail
+	end
+
+	local text = assistant_text_from_parts(data.parts)
+	if type(text) ~= "string" or vim.trim(text) == "" then
+		return nil, "invalid free-text response", {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: parse explain response",
+				"Error: empty explanation text",
+			},
+			body = pretty_body(response.body),
+		}
+	end
+
+	-- First non-empty line is the title (stripped of heading/bold markers); the
+	-- rest is the explanation. If the model gave one block, keep it all as body.
+	local lines = vim.split(text, "\n", { plain = true })
+	local title, body_start
+	for i, line in ipairs(lines) do
+		if vim.trim(line) ~= "" then
+			title = vim.trim(line):gsub("^#+%s*", ""):gsub("^%*+", ""):gsub("%*+$", "")
+			body_start = i + 1
+			break
+		end
+	end
+
+	local explanation = vim.trim(table.concat(vim.list_slice(lines, body_start), "\n"))
+	if explanation == "" then
+		explanation = vim.trim(text)
+		title = title ~= "" and title or "Explanation"
+	end
+
+	return {
+		title = (title ~= nil and title ~= "") and title or "Explanation",
+		explanation = explanation,
 	}, nil, nil
 end
 
@@ -756,7 +864,33 @@ AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 		retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
 	}
 	opts.parse = parse_explain_response
-	return AI.get_opencode_response(base_url, model, prompt, opts, on_done)
+
+	local active_cancel = nil
+	local cancelled = false
+
+	active_cancel = AI.get_opencode_response(base_url, model, prompt, opts, function(response, err)
+		-- The provider refuses a forced tool_choice while the model is in
+		-- thinking mode, so structured output is impossible for this request.
+		-- Retry once as free text (no json_schema = no forced tool_choice).
+		if not cancelled and type(err) == "string" and err:find("Thinking mode does not support", 1, true) then
+			local free_opts = vim.tbl_extend("force", {}, opts)
+			free_opts.format = false
+			free_opts.parse = parse_explain_freetext
+			if free_opts.system == AI.explain_system_prompt then
+				free_opts.system = AI.explain_freetext_system_prompt
+			end
+			active_cancel = AI.get_opencode_response(base_url, model, prompt, free_opts, on_done)
+			return
+		end
+		on_done(response, err)
+	end)
+
+	return function()
+		cancelled = true
+		if active_cancel then
+			active_cancel()
+		end
+	end
 end
 
 return AI
