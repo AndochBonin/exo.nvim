@@ -429,7 +429,10 @@ local function explain_backend_error(data, response)
 		return nil
 	end
 	local error = data.info.error
-	local message = error.message or "explain error"
+	-- The provider's real message is nested under `error.data.message`
+	-- (`error.message` is often absent); fall back through both.
+	local nested = type(error.data) == "table" and error.data.message or nil
+	local message = nested or error.message or "explain error"
 	local label = error.name and (error.name .. ": " .. message) or message
 	local summary = {
 		"OpenCode request failed",
