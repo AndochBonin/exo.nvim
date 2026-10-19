@@ -1,5 +1,6 @@
 # Exo
 
+(README is ai generated)
 Neovim workflow for working with AI — meant to improve speed while still maintaining control
 
 ## Setup
