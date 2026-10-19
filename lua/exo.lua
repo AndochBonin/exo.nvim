@@ -7,8 +7,8 @@ local RESPONSE = require("response")
 -- `start_command` are independent — if you change the URL/port, update
 -- `start_command` to match so the auto-started server binds where we connect.
 local config = {
-    review_model = "opencode-go/deepseek-v4-flash",
-    explain_model = "opencode-go/deepseek-v4-flash",
+    review_model = "opencode-go/deepseek-v4.1-flash",
+    explain_model = "opencode-go/deepseek-v4.1-flash",
     opencode_url = "http://localhost:4096",
     review_agent = "exo-review",
     explain_agent = "exo-explain",

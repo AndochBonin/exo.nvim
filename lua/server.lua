@@ -26,7 +26,7 @@ end
 --- @param base_url string
 --- @param callback fun(up: boolean)
 SERVER.ping = function(base_url, callback)
-    return curl.get(base_url .. "/session", {
+    return curl.get(base_url .. "/api/session", {
         timeout = 1000,
         callback = function()
             vim.schedule(function()

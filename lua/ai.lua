@@ -4,22 +4,6 @@ local AI = {}
 --- @field comment string
 --- @field quality "good"|"okay"|"poor"
 
-AI.review_response_schema = {
-	type = "object",
-	properties = {
-		comment = {
-			type = "string",
-			description = "Brief review of the highlighted code, at most one paragraph",
-		},
-		quality = {
-			type = "string",
-			enum = { "good", "okay", "poor" },
-			description = "Overall code quality assessment",
-		},
-	},
-	required = { "comment", "quality" },
-}
-
 AI.review_system_prompt = [[
 You are an expert code reviewer.
 Review code for: bugs/correctness, security, performance, style/idioms,
@@ -39,8 +23,11 @@ Quality ratings:
 - "okay": minor/style issues, no serious bugs
 - "poor": correctness, security, or significant design problems
 
-If there are no issues, return a short comment saying the code looks good and
-quality "good".
+If there are no issues, say the code looks good and rate quality "good".
+
+Reply with ONLY a single JSON object and nothing else — no prose, no code
+fences — in exactly this shape:
+{"comment": "<your review>", "quality": "good"|"okay"|"poor"}
 ]]
 
 AI.review_prompt = [[
@@ -64,52 +51,17 @@ context of that project: you may read other files in the project (imports,
 callees, types) to ground your explanation. You may also search the web for
 up-to-date information when it helps.
 
-Return a short `title` (3-8 words) summarizing the explanation, and the full
-`explanation` itself formatted as Markdown.
-
 You are in read-only mode: never modify, create, or delete any files. Only
 explain.
-]]
 
--- Fallback prompt used when structured output is refused (e.g. the model's
--- thinking mode rejects a forced tool_choice). Same guidance, but asks for a
--- plain-text shape we can parse ourselves instead of a json_schema.
-AI.explain_freetext_system_prompt = [[
-You are a senior software engineer. Explain the user's question clearly and
-concisely.
-
-When a code selection and project are provided, explain the selection in the
-context of that project: you may read other files in the project (imports,
-callees, types) to ground your explanation. You may also search the web for
-up-to-date information when it helps.
-
-Format your reply as plain text:
-- The FIRST line is a short title (3-8 words), with no prefix and no Markdown.
-- Then a blank line.
-- Then the full explanation, formatted as Markdown.
-
-You are in read-only mode: never modify, create, or delete any files. Only
-explain.
+Reply with ONLY a single JSON object and nothing else — no prose, no code
+fences — in exactly this shape:
+{"title": "<3-8 word title>", "explanation": "<the full explanation as Markdown>"}
 ]]
 
 --- @class ExoExplainResponse
 --- @field title string
 --- @field explanation string
-
-AI.explain_response_schema = {
-	type = "object",
-	properties = {
-		title = {
-			type = "string",
-			description = "A short (3-8 word) title summarizing the explanation",
-		},
-		explanation = {
-			type = "string",
-			description = "The full explanation, formatted as Markdown",
-		},
-	},
-	required = { "title", "explanation" },
-}
 
 -- `%s` (user question). Used on its own when there is no selection.
 AI.explain_prompt = [[%s]]
@@ -153,19 +105,21 @@ end
 
 local curl = require("plenary.curl")
 
--- How many times OpenCode re-asks the model when its structured output fails
--- schema validation (the "structural" errors). Overridable per-call via
--- `opts.retry_count`, and plugin-wide via `config.retry_count`.
-AI.DEFAULT_FORMAT_RETRY_COUNT = 4
+-- How often (ms) to poll the message list while the agent loop runs.
+AI.POLL_INTERVAL_MS = 500
 
 local VALID_QUALITIES = { good = true, okay = true, poor = true }
 
 local function build_headers(opts)
 	local headers = { ["Content-Type"] = "application/json" }
-	if opts and opts.password then
-		local username = opts.username or "opencode"
+	-- OpenCode v2 gates the HTTP API with Basic auth. The password is the same
+	-- $OPENCODE_SERVER_PASSWORD the server is started with (opts.password
+	-- overrides; $OPENCODE_PASSWORD accepted as the official client's alias).
+	local password = (opts and opts.password) or vim.env.OPENCODE_SERVER_PASSWORD or vim.env.OPENCODE_PASSWORD
+	if password then
+		local username = (opts and opts.username) or vim.env.OPENCODE_SERVER_USERNAME or "opencode"
 		local credentials = vim.fn.system(
-			{ "printf", "%s:%s", username, opts.password },
+			{ "printf", "%s:%s", username, password },
 			""
 		):gsub("\n$", "")
 		headers["Authorization"] = "Basic " .. vim.base64.encode(credentials)
@@ -208,8 +162,9 @@ local function pretty_body(body)
 	return body
 end
 
---- @param model string|{ providerID: string, modelID: string }|nil
---- @return { providerID: string, modelID: string }|nil
+--- @param model string|{ providerID: string, id: string }|nil
+--- @return { providerID: string, id: string }|nil
+-- v2's Model.Ref uses `id` (not `modelID`); keep the "provider/model" string form.
 local function parse_model(model)
 	if model == nil or model == "" then
 		return nil
@@ -221,7 +176,7 @@ local function parse_model(model)
 
 	local provider_id, model_id = model:match("^([^/]+)/(.+)$")
 	if provider_id and model_id then
-		return { providerID = provider_id, modelID = model_id }
+		return { providerID = provider_id, id = model_id }
 	end
 
 	return nil
@@ -303,273 +258,93 @@ local function build_curl_error(step, err)
 	}
 end
 
-local function structured_from_parts(parts)
-	if type(parts) ~= "table" then
+-- Pull a JSON object out of the assistant's free text. The model is asked to
+-- reply with only JSON, but may wrap it in ```fences``` or add stray prose;
+-- take the span from the first `{` to the last `}` and decode that.
+local function parse_json_object(text)
+	if type(text) ~= "string" then
 		return nil
 	end
 
-	for _, part in ipairs(parts) do
-		if part.type == "tool" and part.tool == "StructuredOutput" then
-			local input = part.state and part.state.input
-			if type(input) == "table" then
-				return input
-			end
+	local first = text:find("{", 1, true)
+	local last
+	for i = #text, 1, -1 do
+		if text:sub(i, i) == "}" then
+			last = i
+			break
 		end
 	end
+	if not first or not last or last < first then
+		return nil
+	end
 
+	local ok, obj = pcall(vim.json.decode, text:sub(first, last))
+	if ok and type(obj) == "table" then
+		return obj
+	end
 	return nil
 end
 
-local function normalize_structured(structured)
-	if type(structured) ~= "table" then
-		return nil
-	end
-
-	return structured
-end
-
-local function extract_structured(data)
-	if type(data) ~= "table" or type(data.info) ~= "table" then
-		return nil
-	end
-
-	local structured = data.info.structured_output or data.info.structured
-	structured = normalize_structured(structured)
-	if type(structured) == "table" then
-		return structured
-	end
-
-	return normalize_structured(structured_from_parts(data.parts))
-end
-
---- @param response table
+--- Parse the assistant reply into an ExoReviewResponse.
+--- @param text string
 --- @return ExoReviewResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
-local function parse_review_response(response)
-	local data, decode_err = decode_response_body(response.body)
-	if data == nil then
-		return nil, decode_err, {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse review response",
-				"Error: " .. decode_err,
-			},
-			body = pretty_body(response.body),
-		}
+local function parse_review_response(text)
+	local obj = parse_json_object(text)
+	if
+		type(obj) == "table"
+		and type(obj.comment) == "string"
+		and obj.comment ~= ""
+		and VALID_QUALITIES[obj.quality]
+	then
+		return { comment = obj.comment, quality = obj.quality }, nil, nil
 	end
 
-	-- Any nested error carries the real cause (e.g. an APIError from the model backend).
-	-- Surface its name/message instead of falling through to the generic body dump.
-	if data.info and data.info.error then
-		local error = data.info.error
-		local message = error.message or "structured output error"
-		local label = error.name and (error.name .. ": " .. message) or message
-		local summary = {
+	-- Fallback: use the whole reply as the comment.
+	-- ponytail: naive, defaults quality "okay"; tighten if the model misformats often.
+	local trimmed = vim.trim(text or "")
+	if trimmed ~= "" then
+		return { comment = trimmed, quality = "okay" }, nil, nil
+	end
+
+	return nil, "empty review response", {
+		summary = {
 			"OpenCode request failed",
 			"",
 			"Step: parse review response",
-			"Error: " .. label,
-		}
-		if error.retries ~= nil then
-			table.insert(summary, "Retries: " .. tostring(error.retries))
-		end
-		return nil, message, {
-			summary = summary,
-			body = pretty_body(response.body),
-		}
-	end
-
-	local structured = extract_structured(data)
-	if type(structured) ~= "table" then
-		return nil, "invalid structured response", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse review response",
-				"Error: missing structured review output",
-			},
-			body = pretty_body(response.body),
-		}
-	end
-
-	if type(structured.comment) ~= "string" or structured.comment == "" then
-		return nil, "invalid structured response", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse review response",
-				"Error: structured comment is not a non-empty string",
-			},
-			body = pretty_body(structured),
-		}
-	end
-
-	if not VALID_QUALITIES[structured.quality] then
-		return nil, "invalid quality value", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse review response",
-				"Error: invalid quality value: " .. tostring(structured.quality),
-			},
-			body = pretty_body(structured),
-		}
-	end
-
-	return {
-		comment = structured.comment,
-		quality = structured.quality,
-	}, nil, nil
-end
-
--- Surface any nested backend error (e.g. an APIError from the model backend)
--- as (message, err_detail); returns nil when there is no nested error.
-local function explain_backend_error(data, response)
-	if not (data.info and data.info.error) then
-		return nil
-	end
-	local error = data.info.error
-	-- The provider's real message is nested under `error.data.message`
-	-- (`error.message` is often absent); fall back through both.
-	local nested = type(error.data) == "table" and error.data.message or nil
-	local message = nested or error.message or "explain error"
-	local label = error.name and (error.name .. ": " .. message) or message
-	local summary = {
-		"OpenCode request failed",
-		"",
-		"Step: parse explain response",
-		"Error: " .. label,
-	}
-	if error.retries ~= nil then
-		table.insert(summary, "Retries: " .. tostring(error.retries))
-	end
-	return message, {
-		summary = summary,
-		body = pretty_body(response.body),
+			"Error: empty response text",
+		},
+		body = pretty_body(text),
 	}
 end
 
--- Concatenate the assistant's text parts from a free-text (non-structured) reply.
-local function assistant_text_from_parts(parts)
-	if type(parts) ~= "table" then
-		return nil
-	end
-	local chunks = {}
-	for _, part in ipairs(parts) do
-		if part.type == "text" and type(part.text) == "string" then
-			table.insert(chunks, part.text)
-		end
-	end
-	if #chunks == 0 then
-		return nil
-	end
-	return table.concat(chunks)
-end
-
---- Parse a structured explain response ({ title, explanation }).
---- @param response table
+--- Parse the assistant reply into an ExoExplainResponse. Prefers the JSON shape,
+--- falling back to "first non-empty line = title, rest = explanation".
+--- @param text string
 --- @return ExoExplainResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
-local function parse_explain_response(response)
-	local data, decode_err = decode_response_body(response.body)
-	if data == nil then
-		return nil, decode_err, {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse explain response",
-				"Error: " .. decode_err,
-			},
-			body = pretty_body(response.body),
-		}
+local function parse_explain_response(text)
+	local obj = parse_json_object(text)
+	if
+		type(obj) == "table"
+		and type(obj.title) == "string"
+		and obj.title ~= ""
+		and type(obj.explanation) == "string"
+		and obj.explanation ~= ""
+	then
+		return { title = obj.title, explanation = obj.explanation }, nil, nil
 	end
 
-	local backend_message, backend_detail = explain_backend_error(data, response)
-	if backend_message then
-		return nil, backend_message, backend_detail
-	end
-
-	local structured = extract_structured(data)
-	if type(structured) ~= "table" then
-		return nil, "invalid structured response", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse explain response",
-				"Error: missing structured explain output",
-			},
-			body = pretty_body(response.body),
-		}
-	end
-
-	if type(structured.title) ~= "string" or structured.title == "" then
-		return nil, "invalid structured response", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse explain response",
-				"Error: structured title is not a non-empty string",
-			},
-			body = pretty_body(structured),
-		}
-	end
-
-	if type(structured.explanation) ~= "string" or structured.explanation == "" then
-		return nil, "invalid structured response", {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse explain response",
-				"Error: structured explanation is not a non-empty string",
-			},
-			body = pretty_body(structured),
-		}
-	end
-
-	return {
-		title = structured.title,
-		explanation = structured.explanation,
-	}, nil, nil
-end
-
---- Parse a free-text explain reply (fallback when structured output is refused,
---- e.g. the model's thinking mode rejects a forced tool_choice). Expects the
---- title on the first non-empty line and the explanation in the remaining text.
---- @param response table
---- @return ExoExplainResponse|nil, string|nil, { summary: string[], body: string|nil }|nil
-local function parse_explain_freetext(response)
-	local data, decode_err = decode_response_body(response.body)
-	if data == nil then
-		return nil, decode_err, {
-			summary = {
-				"OpenCode request failed",
-				"",
-				"Step: parse explain response",
-				"Error: " .. decode_err,
-			},
-			body = pretty_body(response.body),
-		}
-	end
-
-	local backend_message, backend_detail = explain_backend_error(data, response)
-	if backend_message then
-		return nil, backend_message, backend_detail
-	end
-
-	local text = assistant_text_from_parts(data.parts)
 	if type(text) ~= "string" or vim.trim(text) == "" then
-		return nil, "invalid free-text response", {
+		return nil, "empty explanation", {
 			summary = {
 				"OpenCode request failed",
 				"",
 				"Step: parse explain response",
-				"Error: empty explanation text",
+				"Error: empty response text",
 			},
-			body = pretty_body(response.body),
+			body = pretty_body(text),
 		}
 	end
 
-	-- First non-empty line is the title (stripped of heading/bold markers); the
-	-- rest is the explanation. If the model gave one block, keep it all as body.
 	local lines = vim.split(text, "\n", { plain = true })
 	local title, body_start
 	for i, line in ipairs(lines) do
@@ -583,7 +358,6 @@ local function parse_explain_freetext(response)
 	local explanation = vim.trim(table.concat(vim.list_slice(lines, body_start), "\n"))
 	if explanation == "" then
 		explanation = vim.trim(text)
-		title = title ~= "" and title or "Explanation"
 	end
 
 	return {
@@ -592,15 +366,61 @@ local function parse_explain_freetext(response)
 	}, nil, nil
 end
 
+-- Newest-first scan of the message list for the latest assistant message; return
+-- its concatenated text parts (v2 parts live under `content[]`, type "text").
+local function assistant_text(messages)
+	for _, m in ipairs(messages) do
+		if m.type == "assistant" then
+			local chunks = {}
+			for _, part in ipairs(m.content or {}) do
+				if part.type == "text" and type(part.text) == "string" then
+					table.insert(chunks, part.text)
+				end
+			end
+			return table.concat(chunks), m
+		end
+	end
+	return nil, nil
+end
+
+-- Build an error summary/detail from a failed/interrupted run (idle.error, or the
+-- assistant message's error — both are Session.StructuredError).
+local function run_error(idle, assistant)
+	local e = (idle and idle.error) or (assistant and assistant.error)
+	if type(e) == "table" then
+		local label = (e.type and (e.type .. ": ") or "") .. (e.message or "agent run failed")
+		return e.message or e.type or "agent run failed", {
+			summary = {
+				"OpenCode request failed",
+				"",
+				"Step: agent run",
+				"Error: " .. label,
+			},
+			body = pretty_body(e),
+		}
+	end
+	local outcome = (idle and idle.outcome) or "failed"
+	return "agent run " .. tostring(outcome), {
+		summary = {
+			"OpenCode request failed",
+			"",
+			"Step: agent run",
+			"Outcome: " .. tostring(outcome),
+		},
+	}
+end
+
+--- Run one review/explain against the OpenCode v2 API:
+--- create session → select agent/model → POST a prompt (async) → poll the
+--- message list until the agent loop emits an `idle` message → parse the
+--- assistant's reply → delete the session.
 --- @param base_url string|nil
---- @param model string|{ providerID: string, modelID: string }|nil
+--- @param model string|{ providerID: string, id: string }|nil
 --- @param prompt string
---- @param opts table|nil: may set `agent`, `system`, `title`, `directory`,
----   `timeout`, `retry_count` (structured-output schema retries; defaults to
----   `AI.DEFAULT_FORMAT_RETRY_COUNT`), plus `format` (json_schema table, or
----   `false` to omit and get free text) and `parse` (a
----   `fun(response): result, err, err_detail`). Defaults keep the review
----   json_schema + parser for backward compatibility.
+--- @param opts table|nil: may set `agent`, `system` (prepended to the prompt
+---   text; defaults to the review system prompt), `title`, `directory`,
+---   `timeout`, and `parse` (a `fun(text): result, err, err_detail`; defaults
+---   to the review parser).
 --- @param on_done fun(response: any|nil, err: string|nil)
 --- @return fun() cancel|nil
 AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
@@ -620,28 +440,30 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		return
 	end
 
+	local api = base_url .. "/api"
 	local timeout = opts.timeout or 120000
 	local directory = opts.directory or vim.fn.getcwd()
 	local headers = build_headers(opts)
+	local system = opts.system or AI.review_system_prompt
+	local text = system .. "\n\n" .. prompt
+
 	local cancelled = false
 	local callback_sent = false
 	local session_id = nil
-	local create_job = nil
-	local message_job = nil
+	local current_job = nil
 	local cleanup_started = false
 
 	local function stop_job(job)
 		if job == nil or job.handle == nil then
 			return
 		end
-
 		pcall(function()
 			job.handle:kill(15) -- SIGTERM
 		end)
 	end
 
-	local function delete_session(session_id, then_done)
-		return curl.delete(with_directory(base_url .. "/session/" .. session_id, directory), {
+	local function delete_session(id, then_done)
+		return curl.delete(with_directory(api .. "/session/" .. id, directory), {
 			headers = headers,
 			timeout = timeout,
 			callback = function()
@@ -657,22 +479,20 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		})
 	end
 
-	local function abort_session(session_id, then_done)
-		return curl.post(with_directory(base_url .. "/session/" .. session_id .. "/abort", directory), {
+	local function interrupt_session(id, then_done)
+		return curl.post(with_directory(api .. "/session/" .. id .. "/interrupt", directory), {
 			headers = headers,
 			timeout = timeout,
 			callback = function()
 				then_done()
 			end,
 			on_error = function()
-				-- Deleting the session is still useful if abort races with a
-				-- server-side completion or the session is already gone.
 				then_done()
 			end,
 		})
 	end
 
-	local function cleanup_session(id, abort, then_done)
+	local function cleanup_session(id, interrupt, then_done)
 		if cleanup_started then
 			return
 		end
@@ -682,14 +502,14 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 			delete_session(id, then_done)
 		end
 
-		if abort then
-			abort_session(id, delete)
+		if interrupt then
+			interrupt_session(id, delete)
 		else
 			delete()
 		end
 	end
 
-	local function finish(response, err, err_detail, session_id)
+	local function finish(response, err, err_detail)
 		if cancelled or callback_sent then
 			return
 		end
@@ -723,34 +543,201 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		end
 	end
 
-	create_job = curl.post(with_directory(base_url .. "/session", directory), {
+	-- 5. Poll the message list until an `idle` message appears (the agent loop
+	--    finished); then parse the assistant's reply or surface the run error.
+	local function poll_messages()
+		local deadline = vim.uv.now() + timeout
+
+		local function do_poll()
+			if cancelled then
+				return
+			end
+			current_job = curl.get(with_directory(api .. "/session/" .. session_id .. "/message", directory), {
+				headers = headers,
+				timeout = timeout,
+				callback = function(response)
+					current_job = nil
+					vim.schedule(function()
+						if cancelled or callback_sent then
+							return
+						end
+
+						local data = decode_response_body(response.body)
+						local messages = type(data) == "table" and data.data or nil
+
+						local idle
+						if type(messages) == "table" then
+							for _, m in ipairs(messages) do
+								if m.type == "idle" then
+									idle = m
+									break
+								end
+							end
+						end
+
+						if idle then
+							local body, assistant = assistant_text(messages)
+							if idle.outcome ~= "succeeded" then
+								local msg, detail = run_error(idle, assistant)
+								finish(nil, msg, detail)
+								return
+							end
+							local result, perr, pdetail = parse(body or "")
+							finish(result, perr, pdetail)
+							return
+						end
+
+						if vim.uv.now() >= deadline then
+							finish(nil, "timed out waiting for response", {
+								summary = {
+									"OpenCode request failed",
+									"",
+									"Step: await response",
+									"Error: agent did not finish in time",
+								},
+							})
+							return
+						end
+
+						vim.defer_fn(do_poll, AI.POLL_INTERVAL_MS)
+					end)
+				end,
+				on_error = function(err)
+					current_job = nil
+					vim.schedule(function()
+						if cancelled or callback_sent then
+							return
+						end
+						if vim.uv.now() >= deadline then
+							finish(nil, err.message or "request failed", build_curl_error("await response", err))
+						else
+							vim.defer_fn(do_poll, AI.POLL_INTERVAL_MS)
+						end
+					end)
+				end,
+			})
+		end
+
+		do_poll()
+	end
+
+	-- 4. Send the prompt (async: schedules the agent loop), then poll.
+	local function send_prompt()
+		if cancelled then
+			return
+		end
+		current_job = curl.post(with_directory(api .. "/session/" .. session_id .. "/prompt", directory), {
+			headers = headers,
+			body = vim.json.encode({ text = text }),
+			timeout = timeout,
+			callback = function(response)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				if response.status ~= 200 then
+					finish(nil, "request failed with status code " .. response.status, build_http_error("send prompt", response))
+					return
+				end
+				poll_messages()
+			end,
+			on_error = function(err)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				finish(nil, err.message or "request failed", build_curl_error("send prompt", err))
+			end,
+		})
+	end
+
+	-- 3. Select the model for the session (when configured).
+	local function switch_model(then_next)
+		if not opencode_model then
+			then_next()
+			return
+		end
+		current_job = curl.post(with_directory(api .. "/session/" .. session_id .. "/model", directory), {
+			headers = headers,
+			body = vim.json.encode({ model = opencode_model }),
+			timeout = timeout,
+			callback = function(response)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				if response.status ~= 200 and response.status ~= 204 then
+					finish(nil, "request failed with status code " .. response.status, build_http_error("select model", response))
+					return
+				end
+				then_next()
+			end,
+			on_error = function(err)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				finish(nil, err.message or "request failed", build_curl_error("select model", err))
+			end,
+		})
+	end
+
+	-- 2. Select the agent for the session (when configured).
+	local function switch_agent(then_next)
+		if not opts.agent then
+			then_next()
+			return
+		end
+		current_job = curl.post(with_directory(api .. "/session/" .. session_id .. "/agent", directory), {
+			headers = headers,
+			body = vim.json.encode({ agent = opts.agent }),
+			timeout = timeout,
+			callback = function(response)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				if response.status ~= 200 and response.status ~= 204 then
+					finish(nil, "request failed with status code " .. response.status, build_http_error("select agent", response))
+					return
+				end
+				then_next()
+			end,
+			on_error = function(err)
+				current_job = nil
+				if cancelled then
+					return
+				end
+				finish(nil, err.message or "request failed", build_curl_error("select agent", err))
+			end,
+		})
+	end
+
+	-- 1. Create the session.
+	current_job = curl.post(with_directory(api .. "/session", directory), {
 		headers = headers,
 		body = vim.json.encode({ title = opts.title or "exo-review" }),
 		timeout = timeout,
-		callback = function(session_response)
-			create_job = nil
+		callback = function(response)
+			current_job = nil
 			if cancelled then
-				if session_response.status == 200 then
-					local ok, session_data = pcall(vim.json.decode, session_response.body)
-					if ok and type(session_data) == "table" and type(session_data.id) == "string" then
-						session_id = session_data.id
+				if response.status == 200 then
+					local data = decode_response_body(response.body)
+					if type(data) == "table" and type(data.data) == "table" and type(data.data.id) == "string" then
+						session_id = data.data.id
 						cleanup_cancelled_session()
 					end
 				end
 				return
 			end
 
-			if session_response.status ~= 200 then
-				finish(
-					nil,
-					"request failed with status code " .. session_response.status,
-					build_http_error("create session", session_response)
-				)
+			if response.status ~= 200 then
+				finish(nil, "request failed with status code " .. response.status, build_http_error("create session", response))
 				return
 			end
 
-			local ok, session_data = pcall(vim.json.decode, session_response.body)
-			if not ok or type(session_data) ~= "table" or type(session_data.id) ~= "string" then
+			local data = decode_response_body(response.body)
+			if type(data) ~= "table" or type(data.data) ~= "table" or type(data.data.id) ~= "string" then
 				finish(nil, "error creating session", {
 					summary = {
 						"OpenCode request failed",
@@ -758,75 +745,31 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 						"Step: create session",
 						"Error: response missing session id",
 					},
-					body = pretty_body(session_response.body),
+					body = pretty_body(response.body),
 				})
 				return
 			end
 
-			session_id = session_data.id
+			session_id = data.data.id
 			if cancelled then
 				cleanup_cancelled_session()
 				return
 			end
-			local message_body = {
-				system = opts.system or AI.review_system_prompt,
-				parts = { { type = "text", text = prompt } },
-			}
 
-			-- `opts.format == false` omits the json_schema (free-text reply); an
-			-- explicit table overrides; nil keeps the default review schema.
-			if opts.format ~= nil then
-				message_body.format = opts.format or nil
-			else
-				message_body.format = {
-					type = "json_schema",
-					schema = AI.review_response_schema,
-					retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
-				}
-			end
-
-			if opencode_model then
-				message_body.model = opencode_model
-			end
-
-			if opts.agent then
-				message_body.agent = opts.agent
-			end
-
-			message_job = curl.post(with_directory(base_url .. "/session/" .. session_id .. "/message", directory), {
-				headers = headers,
-				body = vim.json.encode(message_body),
-				timeout = timeout,
-				callback = function(message_response)
-					message_job = nil
+			switch_agent(function()
+				if cancelled then
+					return
+				end
+				switch_model(function()
 					if cancelled then
 						return
 					end
-
-					if message_response.status ~= 200 then
-						finish(
-							nil,
-							"request failed with status code " .. message_response.status,
-							build_http_error("send message", message_response),
-							session_id
-						)
-						return
-					end
-
-					local parsed, err, err_detail = parse(message_response)
-					finish(parsed, err, err_detail, session_id)
-				end,
-				on_error = function(err)
-					message_job = nil
-					if cancelled then
-						return
-					end
-					finish(nil, err.message or "request failed", build_curl_error("send message", err), session_id)
-				end,
-			})
+					send_prompt()
+				end)
+			end)
 		end,
 		on_error = function(err)
-			create_job = nil
+			current_job = nil
 			if cancelled then
 				return
 			end
@@ -838,62 +781,27 @@ AI.get_opencode_response = function(base_url, model, prompt, opts, on_done)
 		if cancelled or callback_sent then
 			return
 		end
-
 		cancelled = true
-		stop_job(create_job)
-		stop_job(message_job)
+		stop_job(current_job)
 		cleanup_cancelled_session()
 	end
 end
 
 --- Request a structured explanation ({ title, explanation }). Thin wrapper over
---- `get_opencode_response` that uses the explain json_schema and parser,
---- defaulting the system prompt to `AI.explain_system_prompt` and the session
---- title to "exo-explain".
+--- `get_opencode_response` that uses the explain system prompt + parser and a
+--- session title of "exo-explain".
 --- @param base_url string|nil
---- @param model string|{ providerID: string, modelID: string }|nil
+--- @param model string|{ providerID: string, id: string }|nil
 --- @param prompt string
---- @param opts table|nil: may set `agent`, `system`, `directory`, `timeout`,
----   `retry_count` (structured-output schema retries).
+--- @param opts table|nil: may set `agent`, `directory`, `timeout`.
 --- @param on_done fun(response: ExoExplainResponse|nil, err: string|nil)
 AI.get_opencode_explanation = function(base_url, model, prompt, opts, on_done)
 	opts = vim.tbl_extend("force", {
 		system = AI.explain_system_prompt,
 		title = "exo-explain",
 	}, opts or {})
-	opts.format = {
-		type = "json_schema",
-		schema = AI.explain_response_schema,
-		retryCount = opts.retry_count or AI.DEFAULT_FORMAT_RETRY_COUNT,
-	}
 	opts.parse = parse_explain_response
-
-	local active_cancel = nil
-	local cancelled = false
-
-	active_cancel = AI.get_opencode_response(base_url, model, prompt, opts, function(response, err)
-		-- The provider refuses a forced tool_choice while the model is in
-		-- thinking mode, so structured output is impossible for this request.
-		-- Retry once as free text (no json_schema = no forced tool_choice).
-		if not cancelled and type(err) == "string" and err:find("Thinking mode does not support", 1, true) then
-			local free_opts = vim.tbl_extend("force", {}, opts)
-			free_opts.format = false
-			free_opts.parse = parse_explain_freetext
-			if free_opts.system == AI.explain_system_prompt then
-				free_opts.system = AI.explain_freetext_system_prompt
-			end
-			active_cancel = AI.get_opencode_response(base_url, model, prompt, free_opts, on_done)
-			return
-		end
-		on_done(response, err)
-	end)
-
-	return function()
-		cancelled = true
-		if active_cancel then
-			active_cancel()
-		end
-	end
+	return AI.get_opencode_response(base_url, model, prompt, opts, on_done)
 end
 
 return AI
